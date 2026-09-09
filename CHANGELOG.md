@@ -89,7 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Settings is available on every workspace for Slack admins; instance fields stay primary-only
-- Leftover `SYNCBOT_FEDERATION_ENABLED`, `REQUIRE_ADMIN`, and `ALLOW_PRIVATE_CHANNELS` env is ignored; a one-time seed copies federation and private-channel policy
+- Leftover `SYNCBOT_FEDERATION_ENABLED`, `REQUIRE_ADMIN`, and `ALLOW_PRIVATE_CHANNELS` env is ignored; one-time seed copies federation and private-channel policy
 
 ### Fixed
 

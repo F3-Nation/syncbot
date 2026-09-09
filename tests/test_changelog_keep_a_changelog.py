@@ -48,7 +48,7 @@ def test_changelog_1_2_1_matches_github_release_style() -> None:
     end = text.index("## [1.2.0]")
     section = text[start:end]
     assert "### Fixed" in section
-    assert "Drop AWS stack RDS and add SQLite Litestream to S3 (#17)" in section
+    assert "AWS stack no longer creates RDS; SQLite + Litestream replicas go to S3" in section
     assert "### bug fixes" not in section.lower()
 
 
