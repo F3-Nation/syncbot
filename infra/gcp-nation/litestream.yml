@@ -1,0 +1,7 @@
+dbs:
+  - path: /data/syncbot.db
+    replicas:
+      - type: gcs
+        bucket: ${LITESTREAM_GCS_BUCKET}
+        path: syncbot.db
+        sync-interval: 1s

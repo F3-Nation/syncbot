@@ -34,10 +34,19 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from slack_bolt import App
-from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 from slack_bolt.request import BoltRequest
 from slack_bolt.response import BoltResponse
 from slack_bolt.util.utils import get_boot_message
+
+# SlackRequestHandler requires boto3, which is pre-installed on AWS Lambda but
+# not in generic containers (e.g. Cloud Run).  Defer the import so non-Lambda
+# deployments don't crash at startup.
+try:
+    from slack_bolt.adapter.aws_lambda import SlackRequestHandler
+
+    _HAS_LAMBDA_ADAPTER = True
+except ImportError:
+    _HAS_LAMBDA_ADAPTER = False
 
 from constants import (
     FEDERATION_ENABLED,
@@ -56,10 +65,17 @@ from logger import (
 )
 from routing import MAIN_MAPPER, VIEW_ACK_MAPPER, VIEW_MAPPER
 
-_SENSITIVE_KEYS = frozenset({
-    "token", "bot_token", "access_token", "shared_secret",
-    "public_key", "private_key", "private_key_encrypted",
-})
+_SENSITIVE_KEYS = frozenset(
+    {
+        "token",
+        "bot_token",
+        "access_token",
+        "shared_secret",
+        "public_key",
+        "private_key",
+        "private_key_encrypted",
+    }
+)
 
 
 def _redact_sensitive(obj, _depth=0):
@@ -67,16 +83,14 @@ def _redact_sensitive(obj, _depth=0):
     if _depth > 10:
         return obj
     if isinstance(obj, dict):
-        return {
-            k: "[REDACTED]" if k in _SENSITIVE_KEYS else _redact_sensitive(v, _depth + 1)
-            for k, v in obj.items()
-        }
+        return {k: "[REDACTED]" if k in _SENSITIVE_KEYS else _redact_sensitive(v, _depth + 1) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_redact_sensitive(v, _depth + 1) for v in obj]
     return obj
 
 
-SlackRequestHandler.clear_all_log_handlers()
+if _HAS_LAMBDA_ADAPTER:
+    SlackRequestHandler.clear_all_log_handlers()
 configure_logging()
 
 validate_config()
@@ -114,6 +128,8 @@ def handler(event: dict, context: dict) -> dict:
     if path.startswith("/api/federation"):
         return _lambda_federation_handler(event)
 
+    if not _HAS_LAMBDA_ADAPTER:
+        raise RuntimeError("Lambda handler called but boto3/slack_bolt Lambda adapter not installed")
     slack_request_handler = SlackRequestHandler(app=app)
     return slack_request_handler.handle(event, context)
 
@@ -224,11 +240,7 @@ def main_response(body: dict, logger, client, ack, context: dict) -> None:
             )
             raise
     else:
-        if not (
-            request_type == "view_submission"
-            and request_id in VIEW_ACK_MAPPER
-            and request_id not in VIEW_MAPPER
-        ):
+        if not (request_type == "view_submission" and request_id in VIEW_ACK_MAPPER and request_id not in VIEW_MAPPER):
             _logger.error(
                 "no_handler",
                 extra={
@@ -386,9 +398,7 @@ def run_syncbot_http_server(
                 content_len = 0
             body_str = self.rfile.read(content_len).decode() if content_len else ""
             headers = {k: v for k, v in self.headers.items()}
-            status, resp = dispatch_federation_request(
-                method, self._path_no_query(), body_str, headers
-            )
+            status, resp = dispatch_federation_request(method, self._path_no_query(), body_str, headers)
             self._send_raw(
                 status,
                 {"Content-Type": ["application/json"]},

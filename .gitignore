@@ -174,3 +174,13 @@ syncbot/.oauth-data/
 # Generated deploy artifacts
 slack-manifest_*.json
 deploy-receipts/
+
+test.db
+
+# Terraform
+**/.terraform/
+**/terraform.tfstate
+**/terraform.tfstate.backup
+**/terraform.tfstate.d/
+infra/gcp-nation/staging.tfvars
+infra/gcp-nation/prod.tfvars
