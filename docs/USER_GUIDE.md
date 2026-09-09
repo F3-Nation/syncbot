@@ -4,7 +4,7 @@ This guide is for **workspace admins and end users** configuring SyncBot in Slac
 
 ## Getting Started
 
-1. Click the install link from a desktop browser (make sure you've selected the correct workspace in the upper right)
+1. From a desktop browser click [this link](https://syncbot-prod-827676898321.us-central1.run.app/slack/install) (then make sure you've selected the correct workspace in the upper right)
 2. Open the **SyncBot** app from the sidebar and click the **Home** tab (requires workspace admin or owner)
 3. The Home tab shows everything in one view:
    - **SyncBot Configuration (bottom row)** — **Refresh** and **Backup/Restore** (full-instance backup download and restore from JSON)
