@@ -17,5 +17,5 @@ Good (1.2.0): `Slack message and reaction sync is idempotent on envelope event_i
 - Headings are only **Added**, **Changed**, **Fixed**, and **Removed** when needed. Never leave python-semantic-release's `### bug fixes` or `### Features`.
 - Start each bullet with a capital letter. Not a raw commit subject.
 - `feat` → Added, `fix`/`perf` → Fixed/Changed. `chore`, `ci`, `docs`, `test`, `style`, `build`, and Dependabot are excluded from the generated draft.
-- Do not bump `pyproject.toml` `version` in a feature PR. You **may** pre-write the next version's section **below** `<!-- version list -->` so the release job keeps it (the template skips a version that is already there). Otherwise polish an already-released heading after the draft lands.
+- Do not bump `pyproject.toml` `version` or add a `## [X.Y.Z]` heading in a feature PR. Put 1.2.0-length bullets under `## [Unreleased]` below `<!-- version list -->`; the release job retitles that heading to the version and date and leaves the block otherwise untouched. If Unreleased is missing, PSR still drafts from `feat` / `fix` / `perf` subjects (or keeps a pre-written `## [X.Y.Z]`).
 - After a release, if the GitHub Release body is still a stub or a paragraph dump, edit it to match the polished CHANGELOG section.

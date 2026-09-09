@@ -14,10 +14,15 @@
 {%- else -%}
 {{ "%s\n" | format(insertion_flag | trim) }}
 {%- endif -%}
+{%- set previous_changelog_bottom = changelog_parts[1] | trim -%}
 {%- if releases | length > 0 -%}
 {%- set release = releases[0] -%}
 {%- set ver = release.version.as_tag() -%}
-{%- if "[" ~ ver ~ "]" not in changelog_parts[1] %}
+{%- set has_version = "[" ~ ver ~ "]" in changelog_parts[1] -%}
+{%- set has_unreleased = "## [Unreleased]" in changelog_parts[1] -%}
+{%- if not has_version and has_unreleased -%}
+{%- set previous_changelog_bottom = previous_changelog_bottom | replace("## [Unreleased]", "## [" ~ ver ~ "] - " ~ release.tagged_date.strftime("%Y-%m-%d"), 1) -%}
+{%- elif not has_version %}
 
 ## [{{ ver }}] - {{ release.tagged_date.strftime("%Y-%m-%d") }}
 
@@ -42,7 +47,6 @@
 {% endfor -%}
 {%- endif -%}
 {%- endif -%}
-{%- set previous_changelog_bottom = changelog_parts[1] | trim -%}
 {%- if previous_changelog_bottom | length > 0 %}
 {{ "\n%s\n" | format(previous_changelog_bottom) }}
 {%- endif -%}

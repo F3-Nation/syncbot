@@ -52,7 +52,7 @@ This repository uses [Conventional Commits](https://www.conventionalcommits.org/
 - **Minor** bump: `feat:` (user-visible additions).
 - **Major** bump: add `BREAKING CHANGE:` in the commit body/footer, or use a `feat!:` / `fix!:` subject line per Conventional Commits.
 - **Squash merges**: the PR title becomes the merge commit **subject** — set the PR title to a valid Conventional Commit (CI enforces this via `.github/workflows/pr-title.yml`). CI fills a **Commits** section on the PR (no `Co-authored-by` lines); keep those as subject lines only. Paste that block into the squash body if you want those messages on `main`. GitHub then adds a single `Co-authored-by` trailer.
-- **Changelog / GitHub Release:** Keep a Changelog headings only (**Added** / **Changed** / **Fixed**). Copy **[1.2.0](CHANGELOG.md)** for length: one short line per bullet, what changed, not why. python-semantic-release drafts from `feat` / `fix` / `perf`; polish (or pre-write that version's section in the release PR) so operators do not see `### bug fixes`, a raw commit subject, or a paragraph dump.
+- **Changelog / GitHub Release:** Keep a Changelog headings only (**Added** / **Changed** / **Fixed**). Copy **[1.2.0](CHANGELOG.md)** for length: one short line per bullet, what changed, not why. Put those bullets under `## [Unreleased]` below `<!-- version list -->`; the release job retitles that heading to the version and date. If Unreleased is missing, python-semantic-release still drafts from `feat` / `fix` / `perf`. Do not hand-write `## [X.Y.Z]`.
 
 Also install the commit-msg hook so local commits are checked:
 

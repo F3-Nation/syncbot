@@ -88,6 +88,16 @@ def test_changelog_1_3_and_later_bullets_are_short() -> None:
     assert too_long == [], "changelog bullets from 1.3.0 on must stay 1.2.0-short:\n" + "\n".join(too_long)
 
 
+def test_changelog_template_promotes_unreleased_heading() -> None:
+    """Release retitles ## [Unreleased]; bullets stay. No Unreleased → commit draft."""
+    text = (TEMPLATE_DIR / "CHANGELOG.md.j2").read_text(encoding="utf-8")
+    assert 'has_unreleased = "## [Unreleased]" in changelog_parts[1]' in text
+    assert ('replace("## [Unreleased]", "## [" ~ ver ~ "] - " ~ release.tagged_date.strftime("%Y-%m-%d"), 1)') in text
+    insert_idx = text.index("elif not has_version")
+    promote_idx = text.index("not has_version and has_unreleased")
+    assert promote_idx < insert_idx
+
+
 def test_semantic_release_templates_map_psr_type_names() -> None:
     helper = (TEMPLATE_DIR / "_keep_a_changelog.j2").read_text(encoding="utf-8")
     changelog_j2 = (TEMPLATE_DIR / "CHANGELOG.md.j2").read_text(encoding="utf-8")
@@ -96,4 +106,7 @@ def test_semantic_release_templates_map_psr_type_names() -> None:
     assert '"features": "Added"' in helper
     assert "kac_heading" in changelog_j2
     assert "kac_heading" in notes_j2
-    assert 'if "[" ~ ver ~ "]" not in changelog_parts[1]' in changelog_j2
+    assert "has_unreleased" in changelog_j2
+    assert 'replace("## [Unreleased]"' in changelog_j2
+    assert "not has_version and has_unreleased" in changelog_j2
+    assert "elif not has_version" in changelog_j2

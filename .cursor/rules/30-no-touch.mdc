@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Do not hand-edit (normal PRs)
 
-- **`CHANGELOG.md`** — python-semantic-release inserts **new** version headings on `main` above `<!-- version list -->` unless that version is already present. Do not bump `pyproject.toml` `version` in a feature PR. Polishing notes under an already-released heading (Keep a Changelog: Added / Changed / Fixed) is OK. You may pre-write the next version's notes in a release PR so the GitHub Release is not a raw commit subject. Match **1.2.0** length: one short line per bullet (see `.cursor/rules/50-changelog.mdc`).
+- **`CHANGELOG.md`** — do not bump `pyproject.toml` `version` or add a `## [X.Y.Z]` heading in a feature PR. Notes go under `## [Unreleased]` below `<!-- version list -->`; the release job retitles that heading to the version and date. If Unreleased is missing, python-semantic-release still inserts from `feat` / `fix` / `perf` unless that version heading is already present. Polishing an already-released heading is OK. Match **1.2.0** length: one short line per bullet (see `.cursor/rules/50-changelog.mdc`).
 - **`pyproject.toml` `version`** — bumped only by the release workflow / semantic-release.
 - **`syncbot/requirements.txt`** — generated via `poetry export` / pre-commit hook from `pyproject.toml`.
 - **Secrets** — never commit `.env`, `.env.deploy.*` with real values; only `*.example` templates belong in git.
