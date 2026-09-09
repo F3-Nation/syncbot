@@ -4,8 +4,8 @@ Defines reusable form templates that are deep-copied and customised at
 runtime before being sent to Slack:
 
 * :data:`ENTER_GROUP_CODE_FORM` — Modal for entering a group invite code.
-* :data:`PUBLISH_CHANNEL_FORM` — Modal for publishing a channel.
-* :data:`SUBSCRIBE_CHANNEL_FORM` — Modal for subscribing to a channel.
+* :data:`CREATE_SYNC_FORM` — Channel picker template for Create Sync.
+* :data:`JOIN_SYNC_FORM` — Channel picker template for Join Sync.
 
 Any form containing a :class:`~slack.orm.ConversationsSelectElement` defaults to
 public channels only. Because these are module-level constants, the
@@ -33,34 +33,34 @@ ENTER_GROUP_CODE_FORM = orm.BlockView(
 )
 
 
-PUBLISH_CHANNEL_FORM = orm.BlockView(
+CREATE_SYNC_FORM = orm.BlockView(
     blocks=[
         orm.InputBlock(
-            label="Channel to Publish",
-            action=actions.CONFIG_PUBLISH_CHANNEL_SELECT,
-            element=orm.ConversationsSelectElement(placeholder="Select a Channel to publish"),
+            label="Channel",
+            action=actions.CONFIG_CREATE_SYNC_SELECT,
+            element=orm.ConversationsSelectElement(placeholder="Search for a Channel"),
             optional=False,
         ),
         orm.ContextBlock(
             element=orm.ContextElement(
-                initial_value="Select a Channel from your Workspace to publish.",
+                initial_value="Select a Channel from your Workspace to create a Sync.",
             ),
         ),
     ]
 )
 
 
-SUBSCRIBE_CHANNEL_FORM = orm.BlockView(
+JOIN_SYNC_FORM = orm.BlockView(
     blocks=[
         orm.InputBlock(
-            label="Channel to Subscribe",
-            action=actions.CONFIG_SUBSCRIBE_CHANNEL_SELECT,
-            element=orm.ConversationsSelectElement(placeholder="Select a Channel to subscribe"),
+            label="Channel",
+            action=actions.CONFIG_JOIN_SYNC_SELECT,
+            element=orm.ConversationsSelectElement(placeholder="Search for a Channel"),
             optional=False,
         ),
         orm.ContextBlock(
             element=orm.ContextElement(
-                initial_value="Select a Channel in your Workspace to receive messages from the published Channel.",
+                initial_value="Select a Channel in your Workspace to join this Sync.",
             ),
         ),
     ]

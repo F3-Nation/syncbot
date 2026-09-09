@@ -139,20 +139,20 @@ class TestPurgeSync:
         helpers.purge_sync(999999)
         helpers.purge_sync(None)
 
-    def test_purge_invalidates_the_sync_list_cache(self, real_db):
+    def test_purge_invalidates_the_channel_memberships_cache(self, real_db):
         """Without invalidation, fan-out keeps targeting deleted rows for up to 60s."""
         import helpers
         from helpers._cache import _cache_get
 
         _, sync, _ = _build_sync()
 
-        assert helpers.get_sync_list("T_PURGE", "C_ACTIVE")
-        assert _cache_get("sync_list:C_ACTIVE") is not None
+        assert helpers.find_channel_memberships("C_ACTIVE")
+        assert _cache_get("channel_memberships:C_ACTIVE:active") is not None
 
         helpers.purge_sync(sync.id)
 
-        assert _cache_get("sync_list:C_ACTIVE") is None
-        assert helpers.get_sync_list("T_PURGE", "C_ACTIVE") == []
+        assert _cache_get("channel_memberships:C_ACTIVE:active") is None
+        assert helpers.find_channel_memberships("C_ACTIVE") == []
 
 
 class TestPurgeSyncChannels:
@@ -173,10 +173,10 @@ class TestPurgeSyncChannels:
 
         _, _, channels = _build_sync()
 
-        helpers.get_sync_list("T_PURGE", "C_ACTIVE")
+        helpers.find_channel_memberships("C_ACTIVE")
         helpers.purge_sync_channels([channels[0]])
 
-        assert _cache_get("sync_list:C_ACTIVE") is None
+        assert _cache_get("channel_memberships:C_ACTIVE:active") is None
 
 
 class TestPurgeWorkspace:

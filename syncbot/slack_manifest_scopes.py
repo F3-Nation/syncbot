@@ -23,6 +23,7 @@ BOT_SCOPES: tuple[str, ...] = (
     "channels:manage",
     "chat:write",
     "chat:write.customize",
+    "emoji:read",
     "files:read",
     "files:write",
     "groups:history",
@@ -32,6 +33,7 @@ BOT_SCOPES: tuple[str, ...] = (
     "reactions:read",
     "reactions:write",
     "team:read",
+    "usergroups:read",
     "users:read",
     "users:read.email",
 )
@@ -47,7 +49,6 @@ USER_SCOPES: tuple[str, ...] = (
     "groups:history",
     "groups:read",
     "groups:write",
-    "im:write",
     "reactions:read",
     "reactions:write",
     "team:read",
@@ -69,7 +70,7 @@ USER_SCOPES: tuple[str, ...] = (
 #    conversation type, files read+write, reactions read+write, users.read plus
 #    users:read.email. Keep ``groups:write`` on its own line ("Manage private
 #    Channels") because inviting SyncBot in is a different promise than viewing
-#    a private Channel. Singleton groups: chat:write, im:write, team:read.
+#    a private Channel. Singleton groups: chat:write, team:read.
 # 4. A group is already-allowed only when *every* scope in it is on the stored
 #    user token. Incomplete pairs stay under Needed. First-time authorize hides
 #    the already-allowed list (it would be empty); a later scope add shows it
@@ -85,7 +86,6 @@ USER_PERMISSION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("View private Channels", ("groups:history", "groups:read")),
     ("Manage private Channels", ("groups:write",)),
     ("Share files", ("files:read", "files:write")),
-    ("Send direct messages", ("im:write",)),
     ("Use emoji reactions", ("reactions:read", "reactions:write")),
     ("View workspace info", ("team:read",)),
     ("View people", ("users:read", "users:read.email")),

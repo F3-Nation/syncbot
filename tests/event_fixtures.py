@@ -1,4 +1,4 @@
-"""Full EventContext builders for dest-post unit tests."""
+"""Full EventContext builders for target-post unit tests."""
 
 from __future__ import annotations
 

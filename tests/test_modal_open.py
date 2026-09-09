@@ -28,7 +28,7 @@ class TestOpenOrPushView:
         orm.open_or_push_view(
             client,
             "trig",
-            {"type": "modal", "callback_id": "publish_mode_submit", "blocks": []},
+            {"type": "modal", "callback_id": "create_sync_submit", "blocks": []},
             body=body,
         )
 
@@ -38,7 +38,7 @@ class TestOpenOrPushView:
         assert "click the button again" in text
         assert "```" in text
         assert "error: expired_trigger_id" in text
-        assert "window: publish_mode_submit" in text
+        assert "window: create_sync_submit" in text
         assert "open: open" in text
 
     def test_other_errors_do_not_dm(self):

@@ -8,12 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- version list -->
 
 
+## [Unreleased]
+
+### Added
+
+- Synced messages and ordinary file shares can post as the mapped person in the other workspace when they have authorized there
+- A Channel can publish only, subscribe only, or both; a second publisher stays in the same channel sync until someone subscribes
+- One Channel can subscribe to more than one distinct published Channel
+- Reaction type Off does not apply incoming reaction add or remove on a subscribing Channel
+
+### Changed
+
+- Authorize SyncBot no longer asks to send DMs as you
+- New publishes are visible to the whole group; a Channel may be published in more than one group
+- Reaction send and receive follow publish and subscribe; Reaction type is Hybrid, Direct, or Off
+- Home Synced Channels lists each partner as a code-ticked `#channel (Workspace)`
+- Home Synced Channels Status includes participation, for example Active (Publish and Subscribe)
+- Home action buttons and in-channel sync notices lead with an emoji
+
+### Fixed
+
+- Thread replies, files, and reactions stay on the original message's sync
+- Unmapped people in synced messages render as Slack code, not literal backticks
+
 ## [1.5.4] - 2026-09-09
 
 ### Fixed
 
 - Keep changelog tests aligned with shortened 1.2.0-length notes (#43)
-
 
 
 ## [1.5.3] - 2026-09-05
@@ -77,7 +99,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Hybrid reaction notices delete on unreact, including child notices under them
-- Deleting a Hybrid notice in one destination stays local to that channel
+- Deleting a Hybrid notice on one target stays local to that channel
 - Bot token refresh no longer rewrites the database on every Home publish
 - User OAuth tokens encrypt at rest; they were stored in plaintext
 - Leftover `REQUIRE_ADMIN`, `SYNCBOT_FEDERATION_ENABLED`, and `SYNCBOT_PUBLIC_URL` removed from deploy; enable federation in Settings if it was never saved there

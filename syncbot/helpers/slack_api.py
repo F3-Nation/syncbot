@@ -9,7 +9,6 @@ from functools import wraps
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from db import DbManager, schemas
 from helpers._cache import _USER_INFO_CACHE_TTL, _cache_get, _cache_set
 from helpers.core import safe_get, synced_from_line_username
 from helpers.message_blocks import blocks_include_body, event_layout_blocks
@@ -250,8 +249,8 @@ def post_message(
             "icon_url": user_profile_url,
             "thread_ts": thread_ts,
             "blocks": all_blocks,
-            # Source permalinks must not unfurl as dest messages. This does not
-            # change Slack web treating archives/p URLs as dest (Private chip).
+            # Source permalinks must not unfurl as target messages. This does not
+            # change Slack web treating archives/p URLs as the target (Private chip).
             "unfurl_links": False,
             "unfurl_media": False,
         }
@@ -259,35 +258,6 @@ def post_message(
             kwargs["reply_broadcast"] = True
         res = slack_client.chat_postMessage(**kwargs)
     return res
-
-
-def get_post_records(thread_ts: str) -> list[tuple[schemas.PostMeta, schemas.SyncChannel, schemas.Workspace]]:
-    """Look up all PostMeta records that share the same ``post_id``."""
-    post = DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.ts == float(thread_ts)])
-    if post:
-        post_records = DbManager.find_join_records3(
-            left_cls=schemas.PostMeta,
-            right_cls1=schemas.SyncChannel,
-            right_cls2=schemas.Workspace,
-            filters=[
-                schemas.PostMeta.post_id == post[0].post_id,
-                schemas.SyncChannel.status == "active",
-                schemas.SyncChannel.deleted_at.is_(None),
-            ],
-        )
-    else:
-        post_records = []
-
-    post_records.sort(key=lambda row: row[0].id)
-
-    seen: set[tuple[int, str]] = set()
-    deduped: list[tuple[schemas.PostMeta, schemas.SyncChannel, schemas.Workspace]] = []
-    for pm, sc, ws in post_records:
-        key = (ws.id, sc.channel_id)
-        if key not in seen:
-            seen.add(key)
-            deduped.append((pm, sc, ws))
-    return deduped
 
 
 @slack_retry

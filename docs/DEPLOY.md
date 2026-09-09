@@ -490,12 +490,12 @@ Schema lives under `syncbot/db/alembic/`. **`alembic upgrade head`** runs:
 
 After deploying a build that changes Slack listener wiring, verify **in the deployed workspace** (not only local dev) that modals using custom interaction responses still work. These flows rely on `view_submission` acks (`response_action`: `update`, `errors`, or `push`) being returned in the **first** Lambda response:
 
-1. **Publish Channel** — Open **Publish Channel**, choose who can subscribe, press **Next**; confirm step 2 (channel picker) appears. Submit a channel that is already syncing to confirm the field error appears instead of the modal closing.
-2. **Subscribe** — Open **Subscribe** from a published channel and submit a channel that is already syncing; confirm the field error appears in the dialog.
+1. **Create Sync** — Open **Create Sync**, choose participation and a Channel on the same screen, then **Create Sync**. Create a Sync, then Create Sync on that same channel into another group and confirm it is accepted. A channel that already participates in another Channel Sync must still be accepted.
+2. **Join Sync** — Open **Join Sync** from an available relationship, choose participation and a local Channel on the same screen, then **Join Sync**. A channel that already participates in another Channel Sync must still be accepted, while trying to join the same workspace to the same published source twice must show a field error.
 3. **Backup / Restore** — Open Backup/Restore; try restore validation (e.g. missing file) and, if possible, the integrity-warning confirmation path (`push`).
 4. **Data migration** (if federation enabled) — Same style of checks for import validation and confirmation.
 5. **Optional** — Trigger a Home tab action that opens a modal via **`views_open`** (uses `trigger_id`) after a cold start to spot-check latency.
-6. **Optional, private Channels** — If they are allowed in **Settings**, click **Authorize SyncBot**, then publish a private Channel in one workspace and subscribe to it from another. SyncBot should appear in both Channels without a warning DM.
+6. **Optional, private Channels** — If they are allowed in **Settings**, click **Authorize SyncBot**, then Create Sync on a private Channel in one workspace and Join Sync from another. SyncBot should appear in both Channels without a warning DM.
 
 ---
 

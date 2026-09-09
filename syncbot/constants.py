@@ -79,14 +79,17 @@ DEFAULT_BROADCAST_ALLOWED_WORKSPACES: list[str] = []
 DEFAULT_SOFT_DELETE_RETENTION_DAYS = 30
 DEFAULT_FEDERATION_ENABLED = False
 
-# Per-channel reaction sync (sync_channels.reaction_direction / reaction_style)
+# Leftover column on sync_channels.reaction_direction. Runtime ignores it;
+# export/import still round-trips values for database restores.
 REACTION_DIRECTION_BOTH = "both"
 REACTION_DIRECTION_SEND = "send"
 REACTION_DIRECTION_RECEIVE = "receive"
 REACTION_DIRECTION_OFF = "off"
 
+# Per-channel reaction type while the channel subscribes.
 REACTION_STYLE_DIRECT_ONLY = "direct_only"
 REACTION_STYLE_THREADED_AND_DIRECT = "threaded_and_direct"
+REACTION_STYLE_OFF = "off"
 
 DEFAULT_REACTION_DIRECTION = REACTION_DIRECTION_BOTH
 DEFAULT_REACTION_STYLE_EXISTING = REACTION_STYLE_THREADED_AND_DIRECT

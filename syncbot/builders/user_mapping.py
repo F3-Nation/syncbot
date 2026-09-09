@@ -131,7 +131,9 @@ def build_user_mapping_list_blocks(
             header(f"User Mapping: {group_name}"),
             block_context(_INTRO),
             block_context("*Mapping users...*"),
-            blocks_actions(button("Refresh List", actions.CONFIG_USER_MAPPING_REFRESH, value=group_val)),
+            blocks_actions(
+                button(":arrows_counterclockwise: Refresh List", actions.CONFIG_USER_MAPPING_REFRESH, value=group_val)
+            ),
             block_context(last_line),
         ]
         return blocks, meta
@@ -159,8 +161,8 @@ def build_user_mapping_list_blocks(
         header(f"User Mapping: {group_name}"),
         block_context(_INTRO),
         blocks_actions(
-            button("Auto Map Now", actions.CONFIG_USER_MAPPING_AUTO_MAP, value=group_val),
-            button("Refresh List", actions.CONFIG_USER_MAPPING_REFRESH, value=group_val),
+            button(":busts_in_silhouette: Auto Map Now", actions.CONFIG_USER_MAPPING_AUTO_MAP, value=group_val),
+            button(":arrows_counterclockwise: Refresh List", actions.CONFIG_USER_MAPPING_REFRESH, value=group_val),
         ),
         block_context(last_line),
         block_context(f"*Mapped: {mapped_count}*  \u00b7  *Unmapped: {unmapped_count}*"),

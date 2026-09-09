@@ -58,10 +58,10 @@ class TestViewAck:
         def ack_handler(b, c, ctx):
             return None
 
-        custom = {actions.CONFIG_PUBLISH_MODE_SUBMIT: ack_handler}
+        custom = {actions.CONFIG_CREATE_SYNC_SUBMIT: ack_handler}
         with patch.object(app_module, "VIEW_ACK_MAPPER", custom):
             app_module.view_ack(
-                _body_view_submit(actions.CONFIG_PUBLISH_MODE_SUBMIT),
+                _body_view_submit(actions.CONFIG_CREATE_SYNC_SUBMIT),
                 MagicMock(),
                 MagicMock(),
                 ack,
@@ -84,10 +84,10 @@ class TestViewAck:
         def ack_handler(b, c, ctx):
             raise RuntimeError("unknown column")
 
-        custom = {actions.CONFIG_PUBLISH_CHANNEL_SUBMIT: ack_handler}
+        custom = {actions.CONFIG_CREATE_SYNC_SUBMIT: ack_handler}
         with patch.object(app_module, "VIEW_ACK_MAPPER", custom):
             app_module.view_ack(
-                _body_view_submit(actions.CONFIG_PUBLISH_CHANNEL_SUBMIT),
+                _body_view_submit(actions.CONFIG_CREATE_SYNC_SUBMIT),
                 MagicMock(),
                 MagicMock(),
                 ack,

@@ -38,7 +38,7 @@ def _activate_group_membership(
     workspace_record: "schemas.Workspace",
     group: "schemas.WorkspaceGroup",
 ) -> None:
-    """Seed mapping stubs from existing directories (no crawl, no auto-map).
+    """Seed mapping stubs from existing directories (no crawl, no auto-match).
 
     Auto Map Now runs from the User Mapping modal. Partners
     keep whatever ``user_directory`` rows they already have.

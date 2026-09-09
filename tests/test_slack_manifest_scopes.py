@@ -21,11 +21,16 @@ def _manifest() -> dict:
 def test_slack_manifest_bot_scopes_match_constants():
     bot = _manifest()["oauth_config"]["scopes"]["bot"]
     assert bot == list(BOT_SCOPES)
+    assert {"emoji:read", "usergroups:read"} <= set(bot)
+    assert "im:write" in bot
+    assert not {"bookmarks:read", "bookmarks:write", "pins:read", "pins:write"} & set(bot)
 
 
 def test_slack_manifest_user_scopes_match_constants():
     user = _manifest()["oauth_config"]["scopes"]["user"]
     assert user == list(USER_SCOPES)
+    assert "im:write" not in user
+    assert not {"bookmarks:read", "bookmarks:write", "pins:read", "pins:write"} & set(user)
 
 
 def test_sam_template_slack_oauth_default_matches_bot_scopes():

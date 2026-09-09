@@ -23,7 +23,7 @@ _TTL = timedelta(minutes=10)
 def slack_message_ts(ts: object) -> str:
     """Normalize a Slack message timestamp to six fractional digits.
 
-    Echo remember uses dest ``PostMeta.ts`` (Decimal); inbound ``event.item.ts`` is
+    Echo remember uses target ``PostMeta.ts`` (Decimal); inbound ``event.item.ts`` is
     Slack's string. ``str(Decimal)`` drops trailing zeros, so the fingerprint must
     not use either form raw.
     """

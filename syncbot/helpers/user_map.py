@@ -475,9 +475,9 @@ def ensure_mapped_target_user_id(
     source_client: WebClient | None = None,
     target_client: WebClient | None = None,
 ) -> str | None:
-    """Return a mapped dest user ID, creating an email mapping for this author if needed.
+    """Return a mapped target user ID, creating an email mapping for this author if needed.
 
-    Email only: unique dest ``user_directory`` hit (case-insensitive), else one
+    Email only: unique target ``user_directory`` hit (case-insensitive), else one
     ``users.lookupByEmail``. Never crawls ``users.list`` or maps by name. On a
     miss, persists a ``none`` stub so later posts skip Slack until TTL expires.
     """
@@ -513,7 +513,7 @@ def ensure_mapped_target_user_id(
             )
             return None
 
-        dest_hits = DbManager.find_records(
+        target_hits = DbManager.find_records(
             schemas.UserDirectory,
             [
                 schemas.UserDirectory.workspace_id == target_workspace_id,
@@ -522,9 +522,9 @@ def ensure_mapped_target_user_id(
             ],
         )
         target_uid: str | None = None
-        if len(dest_hits) == 1:
-            target_uid = dest_hits[0].slack_user_id
-        elif len(dest_hits) == 0 and target_client is not None:
+        if len(target_hits) == 1:
+            target_uid = target_hits[0].slack_user_id
+        elif len(target_hits) == 0 and target_client is not None:
             try:
                 target_uid = _lookup_user_by_email(target_client, email)
             except SlackApiError as exc:
@@ -599,7 +599,7 @@ def get_display_name_and_icon_for_synced_message(
     *,
     source_client: WebClient | None = None,
 ) -> tuple[str | None, str | None, bool, str | None]:
-    """Return (display_name, icon_url, is_mapped, mapped_user_id) when syncing into dest.
+    """Return (display_name, icon_url, is_mapped, mapped_user_id) when syncing into a target.
 
     If the source user is mapped to a user in the target workspace, returns that
     local user's display name and profile image (third element ``True``). Otherwise
@@ -621,9 +621,9 @@ def get_display_name_and_icon_for_synced_message(
     if mapped_id:
         local_name, local_icon = get_user_info(target_client, mapped_id)
         if not local_name:
-            dest_profile = _source_profile_from_directory(target_workspace_id, mapped_id)
-            if dest_profile:
-                local_name = dest_profile.get("display_name") or dest_profile.get("real_name")
+            target_profile = _source_profile_from_directory(target_workspace_id, mapped_id)
+            if target_profile:
+                local_name = target_profile.get("display_name") or target_profile.get("real_name")
         if local_name:
             return local_name, local_icon or source_icon_url, True, mapped_id
         return source_display_name, source_icon_url, True, mapped_id
@@ -816,16 +816,16 @@ def resolve_channel_references(
     source_client: WebClient | None,
     source_workspace: "schemas.Workspace | None" = None,
 ) -> str:
-    """Rewrite source ``#channel`` mentions and Slack permalinks for dest.
+    """Rewrite source ``#channel`` mentions and Slack permalinks for the target.
 
-    Dest twins are never used. ``<#C>`` and channel-only archive URLs become a
+    Target twins are never used. ``<#C>`` and channel-only archive URLs become a
     code-ticked ``#name (Workspace)`` (same-instance and federation). Do not
-    emit dest ``<#C>``, ``slack://``, ``app.slack.com/client``, or channel-only
+    emit target ``<#C>``, ``slack://``, ``app.slack.com/client``, or channel-only
     ``archives/C`` URLs.
 
     Message permalinks (``/archives/C…/p…``) stay as labeled source URLs.
     Those open the source message in the Slack **mobile** app. Slack **web**
-    treats the same URL as a message in the current (dest) workspace and shows
+    treats the same URL as a message in the current target workspace and shows
     a Private chip; that is accepted — do not chase other URL schemes to fix
     the desktop browser.
     """

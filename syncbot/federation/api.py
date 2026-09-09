@@ -30,6 +30,15 @@ import constants
 import helpers
 from db import DbManager, schemas
 from federation import core as federation
+from helpers.envelope import (
+    ACTION_CREATE,
+    ACTION_EDIT,
+    KIND_MESSAGE,
+    build_envelope,
+)
+from helpers.slack_write import slack_write_delete, slack_write_edit
+from helpers.sync_apply import apply_target
+from helpers.sync_participation import channel_subscribes
 from helpers.user_action_echo import slack_message_ts
 from helpers.workspace import invalidate_fed_ws_for_sync_cache
 
@@ -288,15 +297,13 @@ def _resolve_channel_for_federated(
     if not records:
         return None
 
-    sync_channel = records[0]
-    if not _federated_has_channel_access(fed_ws, sync_channel):
-        return None
-
-    workspace = helpers.get_workspace_by_id(sync_channel.workspace_id)
-    if not workspace or not workspace.bot_token:
-        return None
-
-    return sync_channel, workspace
+    for sync_channel in records:
+        if not _federated_has_channel_access(fed_ws, sync_channel):
+            continue
+        workspace = helpers.get_workspace_by_id(sync_channel.workspace_id)
+        if workspace and workspace.bot_token:
+            return sync_channel, workspace
+    return None
 
 
 def _get_local_workspace_ids(fed_ws: schemas.FederatedWorkspace) -> set[int]:
@@ -470,6 +477,8 @@ def handle_message(body: dict, fed_ws: schemas.FederatedWorkspace) -> tuple[int,
     if not resolved:
         return _NOT_FOUND
     sync_channel, workspace = resolved
+    if not channel_subscribes(sync_channel):
+        return 200, {"ok": True, "ts": None}
 
     user_name = user.get("display_name", "Remote User")
     user_avatar = user.get("avatar_url")
@@ -480,6 +489,7 @@ def handle_message(body: dict, fed_ws: schemas.FederatedWorkspace) -> tuple[int,
     ws_client = WebClient(token=bot_token)
 
     source_user_id = user.get("user_id")
+    mapped_local = None
     if source_user_id:
         mapped_local = _ensure_federated_author_mapped(source_user_id, workspace.id, ws_client)
         if mapped_local:
@@ -490,7 +500,7 @@ def handle_message(body: dict, fed_ws: schemas.FederatedWorkspace) -> tuple[int,
                 workspace_name = None
 
     text = _resolve_mentions_for_federated(text, workspace.id, remote_label_for_mentions)
-    # Dest bot cannot conversations_info source C IDs; ticks may stay #Cid.
+    # Target bot cannot conversations_info source C IDs; ticks may stay #Cid.
     text = helpers.resolve_channel_references(text, ws_client, None)
 
     try:
@@ -506,38 +516,36 @@ def handle_message(body: dict, fed_ws: schemas.FederatedWorkspace) -> tuple[int,
             if post_records:
                 thread_ts = slack_message_ts(post_records[0].ts)
 
-        photo_blocks = []
-        if images:
-            for img in images:
-                photo_blocks.append(
-                    {
-                        "type": "image",
-                        "image_url": img.get("url", ""),
-                        "alt_text": img.get("alt_text", "Shared image"),
-                    }
-                )
-
-        res = helpers.post_message(
-            bot_token=bot_token,
-            channel_id=channel_id,
-            msg_text=text,
+        photo_blocks = [
+            {
+                "type": "image",
+                "image_url": img.get("url", ""),
+                "alt_text": img.get("alt_text", "Shared image"),
+            }
+            for img in images
+        ]
+        envelope = build_envelope(
+            kind=KIND_MESSAGE,
+            action=ACTION_CREATE,
+            post_id=str(post_id),
+            source_channel_id=channel_id,
+            source_workspace_id=None,
+            source_sync_channel_id=sync_channel.id,
+            text=text,
+            images=photo_blocks,
+            source_user_id=source_user_id,
             user_name=user_name,
-            user_profile_url=user_avatar,
+            user_avatar_url=user_avatar,
             workspace_name=workspace_name,
-            blocks=photo_blocks if photo_blocks else None,
-            thread_ts=thread_ts,
+            thread_post_id=thread_post_id,
             reply_broadcast=bool(body.get("reply_broadcast")),
         )
-
-        ts = helpers.safe_get(res, "ts")
-
-        if post_id and ts:
-            post_meta = schemas.PostMeta(
-                post_id=post_id if isinstance(post_id, bytes) else post_id.encode()[:100],
-                sync_channel_id=sync_channel.id,
-                ts=float(ts),
-            )
-            DbManager.create_record(post_meta)
+        if mapped_local:
+            envelope["mapped_user_id"] = mapped_local
+        created = apply_target(envelope, sync_channel, workspace, thread_ts=thread_ts)
+        if post_id and created:
+            DbManager.create_records(created)
+        ts = slack_message_ts(created[0].ts) if created else None
 
         _logger.info(
             "federation_message_received",
@@ -567,42 +575,51 @@ def handle_message_edit(body: dict, fed_ws: schemas.FederatedWorkspace) -> tuple
     channel_id = body["channel_id"]
     images = body.get("images", [])[:10]
 
-    resolved = _resolve_channel_for_federated(channel_id, fed_ws)
+    resolved = _resolve_channel_for_federated(channel_id, fed_ws, require_active=True)
     if not resolved:
         return _NOT_FOUND
     sync_channel, workspace = resolved
+    if not channel_subscribes(sync_channel):
+        return 200, {"ok": True, "updated": 0}
 
     remote_label = fed_ws.primary_workspace_name or fed_ws.name or "Remote"
     text = _resolve_mentions_for_federated(text, workspace.id, remote_label)
     ws_client = WebClient(token=helpers.decrypt_bot_token(workspace.bot_token))
-    # Dest bot cannot conversations_info source C IDs; ticks may stay #Cid.
+    # Target bot cannot conversations_info source C IDs; ticks may stay #Cid.
     text = helpers.resolve_channel_references(text, ws_client, None)
 
     post_records = _find_post_records(post_id, sync_channel.id)
 
-    photo_blocks = []
-    if images:
-        for img in images:
-            photo_blocks.append(
-                {
-                    "type": "image",
-                    "image_url": img.get("url", ""),
-                    "alt_text": img.get("alt_text", "Shared image"),
-                }
-            )
+    photo_blocks = [
+        {
+            "type": "image",
+            "image_url": img.get("url", ""),
+            "alt_text": img.get("alt_text", "Shared image"),
+        }
+        for img in images
+    ]
+    envelope = build_envelope(
+        kind=KIND_MESSAGE,
+        action=ACTION_EDIT,
+        post_id=str(post_id),
+        source_channel_id=channel_id,
+        source_workspace_id=None,
+        source_sync_channel_id=sync_channel.id,
+        text=text,
+        images=photo_blocks,
+        workspace_name=remote_label,
+    )
 
     updated = 0
-    bot_token = helpers.decrypt_bot_token(workspace.bot_token)
     for post_meta in post_records:
         try:
-            helpers.post_message(
-                bot_token=bot_token,
-                channel_id=channel_id,
-                msg_text=text,
-                update_ts=slack_message_ts(post_meta.ts),
-                blocks=photo_blocks if photo_blocks else None,
-            )
-            updated += 1
+            if slack_write_edit(
+                envelope=envelope,
+                sync_channel=sync_channel,
+                workspace=workspace,
+                target_post_meta=post_meta,
+            ):
+                updated += 1
         except Exception:
             _logger.warning(
                 "federation_edit_failed", extra={"channel_id": channel_id, "ts": slack_message_ts(post_meta.ts)}
@@ -625,19 +642,24 @@ def handle_message_delete(body: dict, fed_ws: schemas.FederatedWorkspace) -> tup
     post_id = body["post_id"]
     channel_id = body["channel_id"]
 
-    resolved = _resolve_channel_for_federated(channel_id, fed_ws)
+    resolved = _resolve_channel_for_federated(channel_id, fed_ws, require_active=True)
     if not resolved:
         return _NOT_FOUND
     sync_channel, workspace = resolved
+    if not channel_subscribes(sync_channel):
+        return 200, {"ok": True, "deleted": 0}
 
     post_records = _find_post_records(post_id, sync_channel.id)
 
     deleted = 0
-    ws_client = WebClient(token=helpers.decrypt_bot_token(workspace.bot_token))
     for post_meta in post_records:
         try:
-            ws_client.chat_delete(channel=channel_id, ts=slack_message_ts(post_meta.ts))
-            deleted += 1
+            if slack_write_delete(
+                sync_channel=sync_channel,
+                workspace=workspace,
+                target_post_meta=post_meta,
+            ):
+                deleted += 1
         except Exception:
             _logger.warning(
                 "federation_delete_failed", extra={"channel_id": channel_id, "ts": slack_message_ts(post_meta.ts)}
@@ -653,7 +675,7 @@ def handle_message_delete(body: dict, fed_ws: schemas.FederatedWorkspace) -> tup
 
 def handle_message_react(body: dict, fed_ws: schemas.FederatedWorkspace) -> tuple[int, dict]:
     """Receive and apply a reaction add/remove from a federated workspace."""
-    from helpers.reactions import apply_reaction_to_target, channel_receives_reactions
+    from helpers.reaction import apply_reaction_to_target
 
     err = _validate_fields(body, ["post_id", "channel_id", "reaction"], extras=["action"])
     if err:
@@ -667,36 +689,35 @@ def handle_message_react(body: dict, fed_ws: schemas.FederatedWorkspace) -> tupl
     user_avatar_url = body.get("user_avatar_url")
     workspace_name = body.get("workspace_name") or "Remote"
 
-    resolved = _resolve_channel_for_federated(channel_id, fed_ws)
+    resolved = _resolve_channel_for_federated(channel_id, fed_ws, require_active=True)
     if not resolved:
         return _NOT_FOUND
     sync_channel, workspace = resolved
 
-    if not channel_receives_reactions(sync_channel):
+    if not channel_subscribes(sync_channel):
         return 200, {"ok": True, "applied": 0}
 
     post_records = _find_post_records(post_id, sync_channel.id)
     source_user_id = body.get("user_id")
     mapped_local = None
     if source_user_id:
-        dest_client = None
+        target_client = None
         try:
-            dest_client = WebClient(token=helpers.decrypt_bot_token(workspace.bot_token))
+            target_client = WebClient(token=helpers.decrypt_bot_token(workspace.bot_token))
         except Exception:
             _logger.debug(
-                "federation_react_dest_client_failed",
+                "federation_react_target_client_failed",
                 extra={"workspace_id": workspace.id},
             )
-        mapped_local = _ensure_federated_author_mapped(source_user_id, workspace.id, dest_client)
-        if mapped_local and dest_client is not None:
-            local_name, local_icon = helpers.get_user_info(dest_client, mapped_local)
+        mapped_local = _ensure_federated_author_mapped(source_user_id, workspace.id, target_client)
+        if mapped_local and target_client is not None:
+            local_name, local_icon = helpers.get_user_info(target_client, mapped_local)
             if local_name:
                 user_name = local_name
                 user_avatar_url = local_icon or user_avatar_url
                 workspace_name = None
 
     applied = 0
-    synthetic_source = schemas.SyncChannel(reaction_direction=constants.REACTION_DIRECTION_SEND)
     name_probe_cache: dict[tuple[str, str], bool] = {}
     notice_rows: list[schemas.PostMeta] = []
 
@@ -707,7 +728,7 @@ def handle_message_react(body: dict, fed_ws: schemas.FederatedWorkspace) -> tupl
                 reaction=reaction,
                 source_user_id=source_user_id,
                 source_workspace_id=None,
-                source_sync_channel=synthetic_source,
+                source_sync_channel=None,
                 target_post_meta=post_meta,
                 target_sync_channel=sync_channel,
                 target_workspace=workspace,

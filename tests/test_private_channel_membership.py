@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from slack_sdk.errors import SlackApiError
 
-from handlers.channel_sync import handle_publish_channel_submit_work, handle_subscribe_channel_submit
+from handlers.channel_sync import handle_create_sync_submit_work, handle_join_sync_submit
 from helpers.conversations import ConversationAccessError, authorize_url, ensure_bot_in_conversation
 
 
@@ -356,13 +356,13 @@ class TestAuthorizeUrl:
         assert authorize_url("T1", context={"public_base_url": "https://syncbot.example.com"}) is None
 
 
-class TestPublishWritesRowsBeforeAddingTheBot:
+class TestCreateSyncWritesRowsBeforeAddingTheBot:
     """Ordering is the whole fix: rows first, membership second."""
 
     WORKSPACE = SimpleNamespace(id=10, team_id="T1")
     BODY = {"view": {"team_id": "T1"}, "user": {"id": "U1"}}
 
-    def _enter_publish_patches(self, stack: ExitStack, created: list) -> None:
+    def _enter_create_sync_patches(self, stack: ExitStack, created: list) -> None:
         def create_record(record):
             record.id = 99 + len(created)
             created.append(record)
@@ -392,9 +392,9 @@ class TestPublishWritesRowsBeforeAddingTheBot:
             order.append(f"membership after {len(created)} rows")
 
         with ExitStack() as stack:
-            self._enter_publish_patches(stack, created)
+            self._enter_create_sync_patches(stack, created)
             stack.enter_context(patch("handlers._common.helpers.ensure_bot_in_conversation", side_effect=ensure))
-            handle_publish_channel_submit_work(self.BODY, client, MagicMock(), {})
+            handle_create_sync_submit_work(self.BODY, client, MagicMock(), {})
 
         assert [type(record).__name__ for record in created] == ["Sync", "SyncChannel"]
         assert order == ["membership after 2 rows"]
@@ -404,7 +404,7 @@ class TestPublishWritesRowsBeforeAddingTheBot:
         client = MagicMock()
 
         with ExitStack() as stack:
-            self._enter_publish_patches(stack, created)
+            self._enter_create_sync_patches(stack, created)
             stack.enter_context(
                 patch(
                     "handlers._common.helpers.ensure_bot_in_conversation",
@@ -412,33 +412,33 @@ class TestPublishWritesRowsBeforeAddingTheBot:
                 )
             )
             purge_sync = stack.enter_context(patch("handlers.channel_sync.helpers.purge_sync"))
-            handle_publish_channel_submit_work(self.BODY, client, MagicMock(), {})
+            handle_create_sync_submit_work(self.BODY, client, MagicMock(), {})
 
         purge_sync.assert_called_once_with(created[0].id)
         assert client.chat_postMessage.call_args.kwargs["channel"] == "U1"
         assert "no dice" in client.chat_postMessage.call_args.kwargs["text"]
 
-    def test_publish_stores_the_real_channel_name_not_the_id(self):
+    def test_create_sync_stores_the_real_channel_name_not_the_id(self):
         created: list = []
         client = MagicMock()
 
         with ExitStack() as stack:
-            self._enter_publish_patches(stack, created)
+            self._enter_create_sync_patches(stack, created)
             stack.enter_context(
                 patch("handlers.channel_sync.helpers.lookup_channel_meta", return_value=("2nd-f", True))
             )
             stack.enter_context(patch("handlers._common.helpers.ensure_bot_in_conversation"))
-            handle_publish_channel_submit_work(self.BODY, client, MagicMock(), {})
+            handle_create_sync_submit_work(self.BODY, client, MagicMock(), {})
 
         assert created[0].title == "2nd-f"
 
-    def test_publish_refreshes_title_after_the_bot_joins(self):
+    def test_create_sync_refreshes_title_after_the_bot_joins(self):
         created: list = []
         client = MagicMock()
         names = iter([("C1", False), ("2nd-f", False)])
 
         with ExitStack() as stack:
-            self._enter_publish_patches(stack, created)
+            self._enter_create_sync_patches(stack, created)
             stack.enter_context(
                 patch(
                     "handlers.channel_sync.helpers.lookup_channel_meta",
@@ -447,20 +447,20 @@ class TestPublishWritesRowsBeforeAddingTheBot:
             )
             update = stack.enter_context(patch("handlers.channel_sync.DbManager.update_records"))
             stack.enter_context(patch("handlers._common.helpers.ensure_bot_in_conversation"))
-            handle_publish_channel_submit_work(self.BODY, client, MagicMock(), {})
+            handle_create_sync_submit_work(self.BODY, client, MagicMock(), {})
 
         assert created[0].title == "2nd-f"
         update.assert_called_once()
 
 
-class TestSubscribeWritesRowsBeforeAddingTheBot:
-    """Subscribe has the same ordering requirement as publish."""
+class TestJoinSyncWritesRowsBeforeAddingTheBot:
+    """Join Sync has the same ordering requirement as Create Sync."""
 
     WORKSPACE = SimpleNamespace(id=10, team_id="T1")
     BODY = {"view": {"team_id": "T1"}, "user": {"id": "U1"}}
     CONTEXT = {"bot_user_id": "U_THIS_WORKSPACE"}
 
-    def _enter_subscribe_patches(self, stack: ExitStack, created: list) -> None:
+    def _enter_join_sync_patches(self, stack: ExitStack, created: list) -> None:
         def create_record(record):
             record.id = 50 + len(created)
             created.append(record)
@@ -494,9 +494,9 @@ class TestSubscribeWritesRowsBeforeAddingTheBot:
             seen_context.append(kwargs.get("context"))
 
         with ExitStack() as stack:
-            self._enter_subscribe_patches(stack, created)
+            self._enter_join_sync_patches(stack, created)
             stack.enter_context(patch("handlers._common.helpers.ensure_bot_in_conversation", side_effect=ensure))
-            handle_subscribe_channel_submit(self.BODY, client, MagicMock(), self.CONTEXT)
+            handle_join_sync_submit(self.BODY, client, MagicMock(), self.CONTEXT)
 
         assert [type(record).__name__ for record in created] == ["SyncChannel"]
         assert order == ["membership after 1 rows"]
@@ -507,7 +507,7 @@ class TestSubscribeWritesRowsBeforeAddingTheBot:
         client = MagicMock()
 
         with ExitStack() as stack:
-            self._enter_subscribe_patches(stack, created)
+            self._enter_join_sync_patches(stack, created)
             stack.enter_context(
                 patch(
                     "handlers._common.helpers.ensure_bot_in_conversation",
@@ -515,7 +515,7 @@ class TestSubscribeWritesRowsBeforeAddingTheBot:
                 )
             )
             purge = stack.enter_context(patch("handlers.channel_sync.helpers.purge_sync_channels"))
-            handle_subscribe_channel_submit(self.BODY, client, MagicMock(), self.CONTEXT)
+            handle_join_sync_submit(self.BODY, client, MagicMock(), self.CONTEXT)
 
         purge.assert_called_once()
         assert purge.call_args.args[0][0] is created[0]

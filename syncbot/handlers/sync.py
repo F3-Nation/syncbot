@@ -144,7 +144,7 @@ def handle_member_joined_channel(
             channel=channel_id,
             text=":wave: Hello! I'm SyncBot. I was added to this Channel, but this Channel "
             "doesn't seem to be part of a Channel Sync. I'm leaving now. Please open the SyncBot Home "
-            "tab to Publish or Subscribe.",
+            "tab to Create Sync or Join Sync.",
         )
         client.conversations_leave(channel=channel_id)
     except Exception as e:

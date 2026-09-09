@@ -12,49 +12,6 @@ from helpers.encryption import decrypt_bot_token, encrypt_bot_token
 _logger = logging.getLogger(__name__)
 
 
-def get_sync_list(team_id: str, channel_id: str) -> list[tuple[schemas.SyncChannel, schemas.Workspace]]:
-    """Return every (SyncChannel, Workspace) pair that shares a sync with *channel_id*."""
-    cache_key = f"sync_list:{channel_id}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    sync_channel_record = DbManager.find_records(
-        schemas.SyncChannel,
-        [
-            schemas.SyncChannel.channel_id == channel_id,
-            schemas.SyncChannel.deleted_at.is_(None),
-            schemas.SyncChannel.status == "active",
-        ],
-    )
-    if sync_channel_record:
-        sync_channels = DbManager.find_join_records2(
-            left_cls=schemas.SyncChannel,
-            right_cls=schemas.Workspace,
-            filters=[
-                schemas.SyncChannel.sync_id == sync_channel_record[0].sync_id,
-                schemas.SyncChannel.deleted_at.is_(None),
-                schemas.SyncChannel.status == "active",
-            ],
-        )
-    else:
-        sync_channels = []
-
-    # One logical target per (workspace, Slack channel): duplicate SyncChannel rows
-    # (e.g. double-submit on join/subscribe) would otherwise post the same message N times.
-    seen: set[tuple[int, str]] = set()
-    deduped: list[tuple[schemas.SyncChannel, schemas.Workspace]] = []
-    for sc, ws in sync_channels:
-        key = (ws.id, sc.channel_id)
-        if key not in seen:
-            seen.add(key)
-            deduped.append((sc, ws))
-    sync_channels = deduped
-
-    _cache_set(cache_key, sync_channels)
-    return sync_channels
-
-
 def invalidate_fed_ws_for_sync_cache() -> None:
     """Drop cached federation fan-out lookups after pair, unpair, or restore."""
     from helpers._cache import _cache_delete_prefix

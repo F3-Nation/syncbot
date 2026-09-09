@@ -12,7 +12,7 @@ os.environ.setdefault("DATABASE_SCHEMA", "syncbot")
 os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-0-0")
 
 from federation.core import build_edit_payload, build_message_payload  # noqa: E402
-from handlers.messages import _build_file_context, respond_to_message_event  # noqa: E402
+from handlers.message import _build_file_context, respond_to_message_event  # noqa: E402
 from helpers.files import download_slack_files  # noqa: E402
 from helpers.slack_api import post_message  # noqa: E402
 
@@ -38,11 +38,14 @@ class TestMessageSubtypeAllowlist:
     def test_thread_broadcast_goes_to_thread_reply(self):
         body = _message_body(subtype="thread_broadcast", thread_ts="1234567890.000001")
         with (
-            patch("handlers.messages._is_own_bot_message", return_value=False),
-            patch("handlers.messages._build_file_context", return_value=([], [])),
-            patch("handlers.messages._handle_new_post") as new_post,
-            patch("handlers.messages._handle_thread_reply") as thread_reply,
-            patch("handlers.messages.run_claimed", side_effect=lambda _body, fn: fn()),
+            patch("handlers.message._is_own_bot_message", return_value=False),
+            patch("handlers.message._build_file_context", return_value=([], [])),
+            patch("handlers.message._handle_new_post") as new_post,
+            patch("handlers.message._handle_thread_reply") as thread_reply,
+            patch("handlers.message.run_claimed", side_effect=lambda _body, fn: fn()),
+            patch("handlers.message.helpers.channel_has_membership", return_value=True),
+            patch("handlers.message.helpers.origin_publishes_anywhere", return_value=True),
+            patch("handlers.message.helpers.post_meta_exists_for_channel_ts", return_value=False),
         ):
             respond_to_message_event(body, MagicMock(), MagicMock(), {})
         thread_reply.assert_called_once()
@@ -53,11 +56,14 @@ class TestMessageSubtypeAllowlist:
     def test_me_message_syncs_as_new_post(self):
         body = _message_body(subtype="me_message", text="/me waves")
         with (
-            patch("handlers.messages._is_own_bot_message", return_value=False),
-            patch("handlers.messages._build_file_context", return_value=([], [])),
-            patch("handlers.messages._handle_new_post") as new_post,
-            patch("handlers.messages._handle_thread_reply") as thread_reply,
-            patch("handlers.messages.run_claimed", side_effect=lambda _body, fn: fn()),
+            patch("handlers.message._is_own_bot_message", return_value=False),
+            patch("handlers.message._build_file_context", return_value=([], [])),
+            patch("handlers.message._handle_new_post") as new_post,
+            patch("handlers.message._handle_thread_reply") as thread_reply,
+            patch("handlers.message.run_claimed", side_effect=lambda _body, fn: fn()),
+            patch("handlers.message.helpers.channel_has_membership", return_value=True),
+            patch("handlers.message.helpers.origin_publishes_anywhere", return_value=True),
+            patch("handlers.message.helpers.post_meta_exists_for_channel_ts", return_value=False),
         ):
             respond_to_message_event(body, MagicMock(), MagicMock(), {})
         new_post.assert_called_once()
@@ -66,10 +72,10 @@ class TestMessageSubtypeAllowlist:
     def test_channel_join_is_skipped(self):
         body = _message_body(subtype="channel_join")
         with (
-            patch("handlers.messages._is_own_bot_message", return_value=False),
-            patch("handlers.messages._build_file_context") as files,
-            patch("handlers.messages._handle_new_post") as new_post,
-            patch("handlers.messages.run_claimed") as claimed,
+            patch("handlers.message._is_own_bot_message", return_value=False),
+            patch("handlers.message._build_file_context") as files,
+            patch("handlers.message._handle_new_post") as new_post,
+            patch("handlers.message.run_claimed") as claimed,
         ):
             respond_to_message_event(body, MagicMock(), MagicMock(), {})
         files.assert_not_called()
@@ -79,10 +85,10 @@ class TestMessageSubtypeAllowlist:
     def test_message_replied_is_skipped(self):
         body = _message_body(subtype="message_replied", thread_ts="1.1")
         with (
-            patch("handlers.messages._is_own_bot_message", return_value=False),
-            patch("handlers.messages._handle_new_post") as new_post,
-            patch("handlers.messages._handle_thread_reply") as thread_reply,
-            patch("handlers.messages.run_claimed") as claimed,
+            patch("handlers.message._is_own_bot_message", return_value=False),
+            patch("handlers.message._handle_new_post") as new_post,
+            patch("handlers.message._handle_thread_reply") as thread_reply,
+            patch("handlers.message.run_claimed") as claimed,
         ):
             respond_to_message_event(body, MagicMock(), MagicMock(), {})
         new_post.assert_not_called()
@@ -144,7 +150,7 @@ class TestHostedFiles:
             ],
         )
         with patch(
-            "handlers.messages.helpers.download_slack_files", return_value=[{"path": "/tmp/a.pdf", "name": "a.pdf"}]
+            "handlers.message.helpers.download_slack_files", return_value=[{"path": "/tmp/a.pdf", "name": "a.pdf"}]
         ) as dl:
             _blocks, direct = _build_file_context(body, MagicMock(), MagicMock())
         assert direct[0]["name"] == "a.pdf"
@@ -196,6 +202,7 @@ class TestFederationInboundReplyBroadcast:
         sc = MagicMock()
         sc.id = 9
         sc.channel_id = "C1"
+        sc.subscribes = True
         ws = MagicMock()
         ws.id = 2
         ws.bot_token = "enc"
@@ -208,20 +215,28 @@ class TestFederationInboundReplyBroadcast:
             "user": {"display_name": "Ada"},
             "images": [{"url": "https://gif.example/a.gif", "alt_text": "gif"}],
         }
+        created = [
+            schemas.PostMeta(
+                post_id="p1",
+                sync_channel_id=9,
+                ts=1.2,
+                kind="message",
+            )
+        ]
         with (
             patch.object(federation_api, "_resolve_channel_for_federated", return_value=(sc, ws)),
             patch.object(federation_api, "_resolve_mentions_for_federated", side_effect=lambda text, *_a, **_k: text),
             patch("federation.api.helpers.decrypt_bot_token", return_value="xoxb"),
             patch("federation.api.helpers.resolve_channel_references", side_effect=lambda text, *_a, **_k: text),
             patch("federation.api.WebClient"),
-            patch("federation.api.helpers.post_message", return_value={"ts": "1.200000"}) as post,
-            patch.object(federation_api.DbManager, "create_record") as create,
+            patch("federation.api.apply_target", return_value=created) as apply,
+            patch.object(federation_api.DbManager, "create_records") as create,
         ):
             status, resp = federation_api.handle_message(body, fed_ws)
 
         assert status == 200
         assert resp["ok"] is True
-        assert post.call_args.kwargs["reply_broadcast"] is True
-        blocks = post.call_args.kwargs["blocks"]
-        assert blocks[0]["image_url"] == "https://gif.example/a.gif"
-        assert create.call_args.args[0].__class__ is schemas.PostMeta or create.called
+        envelope = apply.call_args.args[0]
+        assert envelope["reply_broadcast"] is True
+        assert envelope["images"][0]["image_url"] == "https://gif.example/a.gif"
+        assert create.called

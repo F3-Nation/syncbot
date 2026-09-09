@@ -22,10 +22,8 @@ from db.event_claims import (  # noqa: E402
     slack_event_identity,
 )
 from db.schemas import ProcessedEvent  # noqa: E402
-from handlers.messages import (  # noqa: E402
-    _handle_reaction,
-    respond_to_message_event,
-)
+from handlers.message import respond_to_message_event  # noqa: E402
+from handlers.reaction_event import _handle_reaction  # noqa: E402
 
 
 @pytest.fixture
@@ -50,6 +48,17 @@ def event_db(tmp_path, monkeypatch):
     db_mod.GLOBAL_ENGINE = old_engine
     db_mod.GLOBAL_SESSION = old_session
     db_mod.GLOBAL_SCHEMA = old_schema
+
+
+@pytest.fixture(autouse=True)
+def pipeline_guards():
+    with (
+        patch("helpers.channel_has_membership", return_value=True),
+        patch("helpers.origin_publishes_anywhere", return_value=True),
+        patch("helpers.post_meta_exists_for_channel_ts", return_value=False),
+        patch("helpers.take_user_action_echo", return_value=False),
+    ):
+        yield
 
 
 def _message_body(**overrides):
@@ -133,9 +142,9 @@ class TestRespondToMessageEventDedup:
         context = {}
 
         with (
-            patch("handlers.messages._is_own_bot_message", return_value=False),
-            patch("handlers.messages._handle_new_post") as mock_new,
-            patch("handlers.messages._build_file_context", return_value=([], [])),
+            patch("handlers.message._is_own_bot_message", return_value=False),
+            patch("handlers.message._handle_new_post") as mock_new,
+            patch("handlers.message._build_file_context", return_value=([], [])),
         ):
             respond_to_message_event(_message_body(event_id=""), client, logger, context)
 
@@ -150,9 +159,9 @@ class TestRespondToMessageEventDedup:
         context = {}
 
         with (
-            patch("handlers.messages._is_own_bot_message", return_value=False),
-            patch("handlers.messages._handle_new_post") as mock_new,
-            patch("handlers.messages._build_file_context") as build_fc,
+            patch("handlers.message._is_own_bot_message", return_value=False),
+            patch("handlers.message._handle_new_post") as mock_new,
+            patch("handlers.message._build_file_context") as build_fc,
         ):
             respond_to_message_event(body, client, logger, context)
 
@@ -169,10 +178,10 @@ class TestRespondToMessageEventDedup:
         context = {}
 
         with (
-            patch("handlers.messages._is_own_bot_message", return_value=False),
-            patch("handlers.messages._handle_new_post") as mock_new,
+            patch("handlers.message._is_own_bot_message", return_value=False),
+            patch("handlers.message._handle_new_post") as mock_new,
             patch(
-                "handlers.messages._build_file_context",
+                "handlers.message._build_file_context",
                 return_value=([], [{"path": "/tmp/x", "name": "x.jpg", "mimetype": "image/jpeg"}]),
             ),
         ):
@@ -187,9 +196,9 @@ class TestRespondToMessageEventDedup:
         context = {"slack_retry_num": 1}
 
         with (
-            patch("handlers.messages._is_own_bot_message", return_value=False),
-            patch("handlers.messages._handle_new_post") as mock_new,
-            patch("handlers.messages._build_file_context", return_value=([], [])),
+            patch("handlers.message._is_own_bot_message", return_value=False),
+            patch("handlers.message._handle_new_post") as mock_new,
+            patch("handlers.message._build_file_context", return_value=([], [])),
         ):
             respond_to_message_event(body, client, logger, context)
             respond_to_message_event(body, client, logger, {**context, "slack_retry_num": 2})
@@ -208,9 +217,9 @@ class TestRespondToMessageEventDedup:
                 raise RuntimeError("sync failed")
 
         with (
-            patch("handlers.messages._is_own_bot_message", return_value=False),
-            patch("handlers.messages._handle_new_post", side_effect=_boom),
-            patch("handlers.messages._build_file_context", return_value=([], [])),
+            patch("handlers.message._is_own_bot_message", return_value=False),
+            patch("handlers.message._handle_new_post", side_effect=_boom),
+            patch("handlers.message._build_file_context", return_value=([], [])),
         ):
             with pytest.raises(RuntimeError, match="sync failed"):
                 respond_to_message_event(body, client, logger, {})
@@ -226,10 +235,10 @@ class TestRespondToMessageEventDedup:
         logger = MagicMock()
 
         with (
-            patch("handlers.messages._is_own_bot_message", return_value=False),
-            patch("handlers.messages._parse_event_fields") as parse,
-            patch("handlers.messages._handle_message_edit") as mock_edit,
-            patch("handlers.messages._build_file_context", return_value=([], [])),
+            patch("handlers.message._is_own_bot_message", return_value=False),
+            patch("handlers.message._parse_event_fields") as parse,
+            patch("handlers.message._handle_message_edit") as mock_edit,
+            patch("handlers.message._build_file_context", return_value=([], [])),
         ):
             parse.return_value = {
                 "event_subtype": "message_changed",
@@ -249,10 +258,10 @@ class TestRespondToMessageEventDedup:
         logger = MagicMock()
 
         with (
-            patch("handlers.messages._is_own_bot_message", return_value=False),
-            patch("handlers.messages._parse_event_fields") as parse,
-            patch("handlers.messages._handle_message_delete") as mock_delete,
-            patch("handlers.messages._build_file_context", return_value=([], [])),
+            patch("handlers.message._is_own_bot_message", return_value=False),
+            patch("handlers.message._parse_event_fields") as parse,
+            patch("handlers.message._handle_message_delete") as mock_delete,
+            patch("handlers.message._build_file_context", return_value=([], [])),
         ):
             parse.return_value = {
                 "event_subtype": "message_deleted",
@@ -271,10 +280,10 @@ class TestRespondToMessageEventDedup:
         logger = MagicMock()
 
         with (
-            patch("handlers.messages._is_own_bot_message", return_value=False),
-            patch("handlers.messages._parse_event_fields") as parse,
-            patch("handlers.messages._handle_thread_reply") as mock_reply,
-            patch("handlers.messages._build_file_context", return_value=([], [])),
+            patch("handlers.message._is_own_bot_message", return_value=False),
+            patch("handlers.message._parse_event_fields") as parse,
+            patch("handlers.message._handle_thread_reply") as mock_reply,
+            patch("handlers.message._build_file_context", return_value=([], [])),
         ):
             parse.return_value = {
                 "event_subtype": None,
@@ -303,16 +312,16 @@ class TestHandleReactionClaim:
     def test_reaction_removed_is_noop_without_claim(self, event_db):
         body = self._reaction_body()
         body["event"]["type"] = "reaction_removed"
-        with patch("handlers.messages.run_claimed") as mock_run:
+        with patch("handlers.reaction_event.run_claimed") as mock_run:
             _handle_reaction(body, MagicMock(), MagicMock(), {})
         mock_run.assert_not_called()
 
     def test_reaction_without_post_meta_does_not_claim(self, event_db):
         body = self._reaction_body()
         with (
-            patch("handlers.messages.helpers.get_own_bot_user_id", return_value="UBOT"),
-            patch("handlers.messages.helpers.get_post_records", return_value=[]),
-            patch("handlers.messages.run_claimed") as mock_run,
+            patch("handlers.reaction_event.helpers.get_own_bot_user_id", return_value="UBOT"),
+            patch("handlers.reaction_event.helpers.get_post_records", return_value=[]),
+            patch("handlers.reaction_event.run_claimed") as mock_run,
         ):
             _handle_reaction(body, MagicMock(), MagicMock(), {})
         mock_run.assert_not_called()
@@ -321,9 +330,9 @@ class TestHandleReactionClaim:
         body = self._reaction_body()
         records = [(MagicMock(), MagicMock(), MagicMock())]
         with (
-            patch("handlers.messages.helpers.get_own_bot_user_id", return_value="UBOT"),
-            patch("handlers.messages.helpers.get_post_records", return_value=records),
-            patch("handlers.messages.run_claimed") as mock_run,
+            patch("handlers.reaction_event.helpers.get_own_bot_user_id", return_value="UBOT"),
+            patch("handlers.reaction_event.helpers.get_post_records", return_value=records),
+            patch("handlers.reaction_event.run_claimed") as mock_run,
         ):
             _handle_reaction(body, MagicMock(), MagicMock(), {})
         mock_run.assert_called_once()
@@ -332,9 +341,9 @@ class TestHandleReactionClaim:
         body = self._reaction_body()
         records = [(MagicMock(), MagicMock(), MagicMock())]
         with (
-            patch("handlers.messages.helpers.get_own_bot_user_id", return_value="UBOT"),
-            patch("handlers.messages.helpers.get_post_records", return_value=records),
-            patch("handlers.messages._sync_reaction_records") as mock_sync,
+            patch("handlers.reaction_event.helpers.get_own_bot_user_id", return_value="UBOT"),
+            patch("handlers.reaction_event.helpers.get_post_records", return_value=records),
+            patch("handlers.reaction_event._sync_reaction_records") as mock_sync,
         ):
             _handle_reaction(body, MagicMock(), MagicMock(), {})
             _handle_reaction(body, MagicMock(), MagicMock(), {})
@@ -342,7 +351,7 @@ class TestHandleReactionClaim:
 
 
 class TestHandleReactionEchoSkip:
-    def test_dest_echo_skips_fan_out_inside_claim(self, event_db):
+    def test_target_echo_skips_fan_out_inside_claim(self, event_db):
         body = {
             "event_id": "EvECHO1",
             "team_id": "T2",
@@ -350,15 +359,15 @@ class TestHandleReactionEchoSkip:
                 "type": "reaction_added",
                 "user": "U_MAPPED",
                 "reaction": "thumbsup",
-                "item": {"type": "message", "channel": "C_DST", "ts": "200.0"},
+                "item": {"type": "message", "channel": "C_TGT", "ts": "200.0"},
             },
         }
         records = [(MagicMock(), MagicMock(), MagicMock())]
         with (
-            patch("handlers.messages.helpers.get_own_bot_user_id", return_value="UBOT"),
-            patch("handlers.messages.helpers.get_post_records", return_value=records),
-            patch("helpers.user_action_echo.take_user_action_echo", return_value=True) as take_mock,
-            patch("handlers.messages._sync_reaction_records") as sync_mock,
+            patch("handlers.reaction_event.helpers.get_own_bot_user_id", return_value="UBOT"),
+            patch("handlers.reaction_event.helpers.get_post_records", return_value=records),
+            patch("handlers.reaction_event.helpers.take_user_action_echo", return_value=True) as take_mock,
+            patch("handlers.reaction_event._sync_reaction_records") as sync_mock,
         ):
             _handle_reaction(body, MagicMock(), MagicMock(), {})
 
@@ -373,15 +382,15 @@ class TestHandleReactionEchoSkip:
                 "type": "reaction_added",
                 "user": "U_HUMAN",
                 "reaction": "thumbsup",
-                "item": {"type": "message", "channel": "C_DST", "ts": "200.0"},
+                "item": {"type": "message", "channel": "C_TGT", "ts": "200.0"},
             },
         }
         records = [(MagicMock(), MagicMock(), MagicMock())]
         with (
-            patch("handlers.messages.helpers.get_own_bot_user_id", return_value="UBOT"),
-            patch("handlers.messages.helpers.get_post_records", return_value=records),
-            patch("helpers.user_action_echo.take_user_action_echo", return_value=False),
-            patch("handlers.messages._sync_reaction_records") as sync_mock,
+            patch("handlers.reaction_event.helpers.get_own_bot_user_id", return_value="UBOT"),
+            patch("handlers.reaction_event.helpers.get_post_records", return_value=records),
+            patch("handlers.reaction_event.helpers.take_user_action_echo", return_value=False),
+            patch("handlers.reaction_event._sync_reaction_records") as sync_mock,
         ):
             _handle_reaction(body, MagicMock(), MagicMock(), {})
 
@@ -395,15 +404,15 @@ class TestHandleReactionEchoSkip:
                 "type": "reaction_added",
                 "user": "U_MAPPED",
                 "reaction": "thumbsup",
-                "item": {"type": "message", "channel": "C_DST", "ts": "200.0"},
+                "item": {"type": "message", "channel": "C_TGT", "ts": "200.0"},
             },
         }
         records = [(MagicMock(), MagicMock(), MagicMock())]
         with (
-            patch("handlers.messages.helpers.get_own_bot_user_id", return_value="UBOT"),
-            patch("handlers.messages.helpers.get_post_records", return_value=records),
-            patch("helpers.user_action_echo.take_user_action_echo", return_value=True),
-            patch("handlers.messages._sync_reaction_records") as sync_mock,
+            patch("handlers.reaction_event.helpers.get_own_bot_user_id", return_value="UBOT"),
+            patch("handlers.reaction_event.helpers.get_post_records", return_value=records),
+            patch("handlers.reaction_event.helpers.take_user_action_echo", return_value=True),
+            patch("handlers.reaction_event._sync_reaction_records") as sync_mock,
         ):
             _handle_reaction(body, MagicMock(), MagicMock(), {})
             _handle_reaction(body, MagicMock(), MagicMock(), {})

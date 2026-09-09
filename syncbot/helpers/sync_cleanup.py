@@ -23,21 +23,16 @@ here would be a circular import at Lambda cold start.
 import logging
 
 from db import DbManager, schemas
-from helpers._cache import _cache_delete
+from helpers._cache import _cache_delete_prefix
 
 _logger = logging.getLogger(__name__)
 
 
-def _invalidate_sync_list(channel_ids) -> None:
-    """Drop cached ``get_sync_list`` entries for *channel_ids*.
-
-    ``get_sync_list`` caches under ``sync_list:{channel_id}`` for 60 seconds, so
-    without this a warm container keeps fanning messages out to channels whose
-    rows were just deleted.
-    """
+def _invalidate_channel_memberships(channel_ids) -> None:
+    """Drop cached membership entries for *channel_ids*."""
     for channel_id in channel_ids:
         if channel_id:
-            _cache_delete(f"sync_list:{channel_id}")
+            _cache_delete_prefix(f"channel_memberships:{channel_id}:")
 
 
 def purge_sync(sync_id: int) -> None:
@@ -70,7 +65,7 @@ def purge_sync(sync_id: int) -> None:
 
     DbManager.delete_records(schemas.Sync, [schemas.Sync.id == sync_id])
 
-    _invalidate_sync_list(channel.channel_id for channel in channels)
+    _invalidate_channel_memberships(channel.channel_id for channel in channels)
 
     _logger.info(
         "sync_purged",
@@ -95,7 +90,7 @@ def purge_sync_channels(channels) -> None:
             [schemas.SyncChannel.id == channel.id],
         )
 
-    _invalidate_sync_list(channel.channel_id for channel in channels)
+    _invalidate_channel_memberships(channel.channel_id for channel in channels)
 
 
 def purge_workspace(workspace_id: int) -> None:
@@ -111,8 +106,8 @@ def purge_workspace(workspace_id: int) -> None:
     if not workspace_id:
         return
 
-    # Syncs this workspace published are removed outright, along with every
-    # subscriber's copy — the same authority handle_unpublish_channel uses.
+    # Syncs this workspace originally created are removed outright, along with every
+    # subscriber's copy — the same authority the last publisher's Leave Sync uses.
     published = DbManager.find_records(
         schemas.Sync,
         [schemas.Sync.publisher_workspace_id == workspace_id],

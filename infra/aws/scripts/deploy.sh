@@ -1142,8 +1142,8 @@ if [[ "${ENV_FILE_LOADED:-}" == "true" ]]; then
     "EnableXRay=${AWS_ENABLE_XRAY:-false}"
     "DatabaseHost=${DATABASE_HOST:-}"
     "DatabasePort=${DATABASE_PORT:-}"
-    "SlackOauthBotScopes=${SLACK_BOT_SCOPES:-app_mentions:read,channels:history,channels:join,channels:read,channels:manage,chat:write,chat:write.customize,files:read,files:write,groups:history,groups:read,groups:write,im:write,reactions:read,reactions:write,team:read,users:read,users:read.email}"
-    "SlackOauthUserScopes=${SLACK_USER_SCOPES:-chat:write,channels:history,channels:read,files:read,files:write,groups:history,groups:read,groups:write,im:write,reactions:read,reactions:write,team:read,users:read,users:read.email}"
+    "SlackOauthBotScopes=${SLACK_BOT_SCOPES:-app_mentions:read,channels:history,channels:join,channels:read,channels:manage,chat:write,chat:write.customize,emoji:read,files:read,files:write,groups:history,groups:read,groups:write,im:write,reactions:read,reactions:write,team:read,usergroups:read,users:read,users:read.email}"
+    "SlackOauthUserScopes=${SLACK_USER_SCOPES:-chat:write,channels:history,channels:read,files:read,files:write,groups:history,groups:read,groups:write,reactions:read,reactions:write,team:read,users:read,users:read.email}"
   )
 
   echo "=== SAM Build ==="
@@ -1532,8 +1532,8 @@ if [[ "$DATABASE_BACKEND" != "sqlite" ]]; then
   [[ -n "$DATABASE_PORT" ]] && PARAMS+=("DatabasePort=$DATABASE_PORT")
 fi
 PARAMS+=(
-  "SlackOauthBotScopes=${SLACK_BOT_SCOPES:-app_mentions:read,channels:history,channels:join,channels:read,channels:manage,chat:write,chat:write.customize,files:read,files:write,groups:history,groups:read,groups:write,im:write,reactions:read,reactions:write,team:read,users:read,users:read.email}"
-  "SlackOauthUserScopes=${SLACK_USER_SCOPES:-chat:write,channels:history,channels:read,files:read,files:write,groups:history,groups:read,groups:write,im:write,reactions:read,reactions:write,team:read,users:read,users:read.email}"
+  "SlackOauthBotScopes=${SLACK_BOT_SCOPES:-app_mentions:read,channels:history,channels:join,channels:read,channels:manage,chat:write,chat:write.customize,emoji:read,files:read,files:write,groups:history,groups:read,groups:write,im:write,reactions:read,reactions:write,team:read,usergroups:read,users:read,users:read.email}"
+  "SlackOauthUserScopes=${SLACK_USER_SCOPES:-chat:write,channels:history,channels:read,files:read,files:write,groups:history,groups:read,groups:write,reactions:read,reactions:write,team:read,users:read,users:read.email}"
 )
 
 echo "=== SAM Build ==="

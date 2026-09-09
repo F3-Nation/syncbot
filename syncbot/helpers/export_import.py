@@ -282,11 +282,11 @@ def invalidate_home_tab_caches_for_all_teams(team_ids: list[str]) -> None:
         invalidate_home_tab_caches_for_team(tid)
 
 
-def invalidate_sync_list_cache_for_channel(channel_id: str) -> None:
-    """Clear get_sync_list cache for a channel."""
-    from helpers._cache import _cache_delete
+def invalidate_channel_memberships_cache(channel_id: str) -> None:
+    """Clear membership caches for a channel."""
+    from helpers.sync_participation import invalidate_channel_memberships
 
-    _cache_delete(f"sync_list:{channel_id}")
+    invalidate_channel_memberships(channel_id)
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +363,10 @@ def build_migration_export(workspace_id: int, include_source_instance: bool = Tr
                     "sync_title": sync.title,
                     "channel_id": sync_channel.channel_id,
                     "status": sync_channel.status or "active",
+                    "publishes": sync_channel.publishes,
+                    "subscribes": sync_channel.subscribes,
+                    "reaction_style": sync_channel.reaction_style,
+                    "reaction_direction": sync_channel.reaction_direction,
                 }
             )
             key = f"{sync.title}:{sync_channel.channel_id}"
@@ -380,6 +384,7 @@ def build_migration_export(workspace_id: int, include_source_instance: bool = Tr
                     "reaction": getattr(post_meta, "reaction", None),
                     "source_user_id": getattr(post_meta, "source_user_id", None),
                     "source_workspace_id": getattr(post_meta, "source_workspace_id", None),
+                    "posted_as_user_id": getattr(post_meta, "posted_as_user_id", None),
                 }
                 for post_meta in post_metas
             ]
@@ -578,6 +583,10 @@ def import_migration_data(
             workspace_id=workspace_id,
             channel_id=channel_id,
             status=status,
+            publishes=sc_entry.get("publishes", True),
+            subscribes=sc_entry.get("subscribes", True),
+            reaction_style=sc_entry.get("reaction_style"),
+            reaction_direction=sc_entry.get("reaction_direction") or constants.DEFAULT_REACTION_DIRECTION,
             created_at=datetime.now(UTC),
         )
         DbManager.create_record(new_sync_channel)
@@ -593,6 +602,7 @@ def import_migration_data(
                     reaction=post_meta.get("reaction"),
                     source_user_id=post_meta.get("source_user_id"),
                     source_workspace_id=post_meta.get("source_workspace_id"),
+                    posted_as_user_id=post_meta.get("posted_as_user_id"),
                 )
             )
 

@@ -3,13 +3,14 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from handlers.messages import _parse_event_fields, _same_instance_dest_post
+from handlers.message import _parse_event_fields
 from helpers.message_blocks import (
     choose_message_text,
     content_blocks_for_sync,
     text_from_blocks,
 )
 from helpers.slack_api import post_message
+from helpers.slack_write import slack_write_create
 from tests.event_fixtures import make_event_context
 
 
@@ -173,7 +174,7 @@ class TestParseEventUsesBlocks:
 
 class TestHandleMessageEditForwardsLayoutBlocks:
     def test_chat_update_gets_section_blocks(self):
-        from handlers.messages import _handle_message_edit
+        from handlers.message import _handle_message_edit
 
         ctx = make_event_context(
             channel_id="C_SRC",
@@ -183,24 +184,21 @@ class TestHandleMessageEditForwardsLayoutBlocks:
             user_id=None,
             content_blocks=content_blocks_for_sync(_preblast_blocks()),
         )
-        post_meta = SimpleNamespace(post_id="p1", ts=2.0, sync_channel_id=2)
-        sync_channel = SimpleNamespace(channel_id="C_TGT", id=2, sync_id=1)
-        workspace = SimpleNamespace(id=2, bot_token="enc")
+        post_meta = SimpleNamespace(post_id="p1", ts=1.0, sync_channel_id=1)
+        sync_channel = SimpleNamespace(channel_id="C_SRC", id=1, sync_id=1)
+        workspace = SimpleNamespace(id=1, team_id="T1", bot_token="enc")
         with (
-            patch("handlers.messages.helpers.get_post_records", return_value=[(post_meta, sync_channel, workspace)]),
-            patch("handlers.messages.helpers.get_federated_workspace_for_sync", return_value=None),
-            patch("handlers.messages.helpers.decrypt_bot_token", return_value="xoxb"),
-            patch("handlers.messages.WebClient"),
-            patch("handlers.messages.helpers.apply_mentioned_users", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.resolve_mention_for_workspace", side_effect=lambda *_a, **_k: "<@U_DST>"),
-            patch("handlers.messages.helpers.get_mapped_target_user_id", return_value=None),
-            patch("handlers.messages.helpers.get_workspace_by_id", return_value=None),
-            patch("handlers.messages.helpers.post_message", return_value={"ts": "2.0"}) as post,
+            patch("handlers.message.helpers.get_post_records", return_value=[(post_meta, sync_channel, workspace)]),
+            patch("handlers.message.helpers.find_origin_sync_channel", return_value=sync_channel),
+            patch("handlers.message.helpers.resolve_workspace_name", return_value="Source"),
+            patch("handlers.message.helpers.run_sync_pipeline", return_value=[]) as pipeline,
         ):
             _handle_message_edit(MagicMock(), MagicMock(), ctx, [])
-        assert post.call_args.kwargs["update_ts"] == "2.000000"
-        blocks = post.call_args.kwargs["blocks"]
+        envelope = pipeline.call_args.args[0]
+        blocks = envelope["blocks"]
+        assert envelope["source_sync_channel_id"] == 1
+        assert envelope["people"][0]["user_id"] == "U_SRC"
+        assert blocks[0]["type"] == "section"
         assert blocks[0]["type"] == "section"
         assert "🌭" in blocks[1]["text"]["text"]
 
@@ -215,38 +213,37 @@ class TestDestPostForwardsLayoutBlocks:
             content_blocks=content_blocks_for_sync(_preblast_blocks()),
         )
         with (
-            patch("handlers.messages.helpers.decrypt_bot_token", return_value="xoxb"),
-            patch("handlers.messages.WebClient"),
+            patch("helpers.slack_write.decrypt_bot_token", return_value="xoxb"),
+            patch("helpers.slack_write.WebClient"),
             patch(
-                "handlers.messages.helpers.get_display_name_and_icon_for_synced_message",
+                "helpers.slack_write.get_display_name_and_icon_for_synced_message",
                 return_value=("Loboto", "https://icon", False, None),
             ),
-            patch("handlers.messages.helpers.apply_mentioned_users", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.resolve_mention_for_workspace", side_effect=lambda *_a, **_k: "<@U_DST>"),
-            patch("handlers.messages.helpers.get_mapped_target_user_id", return_value=None),
-            patch("handlers.messages.helpers.get_workspace_by_id", return_value=None),
-            patch("handlers.messages.helpers.post_message", return_value={"ts": "9.0"}) as post,
+            patch("helpers.slack_write.apply_mentioned_users", side_effect=lambda t, *_a, **_k: t),
+            patch("helpers.slack_write.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
+            patch("helpers.slack_write.resolve_mention_for_workspace", side_effect=lambda *_a, **_k: "<@U_TGT>"),
+            patch("helpers.workspace.get_workspace_by_id", return_value=None),
+            patch("helpers.slack_write.post_message", return_value={"ts": "9.0"}) as post,
         ):
-            _same_instance_dest_post(
-                body={"event": {"ts": "1.0"}},
-                client=MagicMock(),
-                ctx=ctx,
-                photo_blocks=[],
-                direct_files=None,
+            slack_write_create(
+                envelope={
+                    "source_workspace_id": 1,
+                    "user_name": "Loboto",
+                    "user_avatar_url": "https://icon",
+                    "workspace_name": "F3 Tulsa",
+                    "text": ctx["msg_text"],
+                    "blocks": ctx["content_blocks"],
+                },
                 sync_channel=SimpleNamespace(channel_id="C_TGT", id=2),
-                workspace=SimpleNamespace(id=2, bot_token="enc"),
-                source_workspace_id=1,
-                user_name="Loboto",
-                user_profile_url="https://icon",
-                workspace_name="F3 Tulsa",
+                workspace=SimpleNamespace(id=2, team_id="T2", bot_token="enc"),
+                source_client=MagicMock(),
             )
         blocks = post.call_args.kwargs["blocks"]
         assert len(blocks) == 2
         assert blocks[0]["type"] == "section"
         assert "\n" in blocks[0]["text"]["text"]
         assert "🌭" in blocks[1]["text"]["text"]
-        assert "<@U_DST>" in blocks[0]["text"]["text"]
+        assert "<@U_TGT>" in blocks[0]["text"]["text"]
 
 
 class TestPostMessageSkipsPrependWhenBodyBlocksPresent:
@@ -379,12 +376,44 @@ class TestRewriteContentBlocksRichText:
         ]
 
         def map_user(uid: str):
-            return "U_DST" if uid == "U_SRC" else None
+            return "U_TGT" if uid == "U_SRC" else None
 
         out = rewrite_content_blocks(blocks, lambda t: t, map_user, lambda u: f"`{u} (Acme)`")
         els = out[0]["elements"][0]["elements"]
-        assert els[0] == {"type": "user", "user_id": "U_DST"}
-        assert els[2] == {"type": "text", "text": "`U_NONE (Acme)`"}
+        assert els[0] == {"type": "user", "user_id": "U_TGT"}
+        assert els[2] == {"type": "text", "text": "U_NONE (Acme)", "style": {"code": True}}
+
+    def test_rich_text_unmapped_user_uses_code_ticked_display_name(self):
+        from helpers.message_blocks import rewrite_content_blocks
+        from helpers.user_map import unmapped_author_label
+
+        blocks = [
+            {
+                "type": "rich_text",
+                "elements": [
+                    {
+                        "type": "rich_text_section",
+                        "elements": [
+                            {"type": "user", "user_id": "U_NONE"},
+                            {"type": "text", "text": " what's up?"},
+                        ],
+                    }
+                ],
+            }
+        ]
+        out = rewrite_content_blocks(
+            blocks,
+            lambda t: t,
+            lambda _u: None,
+            lambda _u: unmapped_author_label("F3ttown Downrange Q", "F3 T-Town Test"),
+        )
+        els = out[0]["elements"][0]["elements"]
+        assert els[0] == {
+            "type": "text",
+            "text": "F3ttown Downrange Q (F3 T-Town Test)",
+            "style": {"code": True},
+        }
+        assert els[1] == {"type": "text", "text": " what's up?"}
 
 
 class TestBlockKitLimits:

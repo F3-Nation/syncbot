@@ -56,7 +56,7 @@ AUTHORIZE_HINT = (
 class ConversationAccessError(Exception):
     """SyncBot could not become a member of a channel.
 
-    The message is written for the admin who clicked Publish or Subscribe, so it
+    The message is written for the admin who clicked Create Sync or Join Sync, so it
     can be shown as a modal field error or sent as a DM without rewording.
     """
 

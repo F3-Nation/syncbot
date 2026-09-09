@@ -201,6 +201,14 @@ class TestGetRequestType:
         body = {"type": "something_else"}
         assert helpers.get_request_type(body) == ("unknown", "unknown")
 
+    def test_join_sync_suffix_collapses_but_picker_does_not(self):
+        from slack import actions
+
+        join = {"type": "block_actions", "actions": [{"action_id": f"{actions.CONFIG_JOIN_SYNC}_55"}]}
+        assert helpers.get_request_type(join) == ("block_actions", actions.CONFIG_JOIN_SYNC)
+        picker = {"type": "block_actions", "actions": [{"action_id": actions.CONFIG_JOIN_SYNC_SELECT}]}
+        assert helpers.get_request_type(picker) == ("block_actions", actions.CONFIG_JOIN_SYNC_SELECT)
+
 
 # -----------------------------------------------------------------------
 # slack_retry decorator
@@ -387,8 +395,8 @@ class TestResolveChannelReferences:
         assert "slack://" not in result
         assert result == "see `#general (Acme)`"
 
-    def test_source_tick_even_when_dest_twin_would_exist(self):
-        """Synced twins must not become dest <#C>; keep a code-ticked source name."""
+    def test_source_tick_even_when_target_twin_would_exist(self):
+        """Synced twins must not become target <#C>; keep a code-ticked source name."""
         client = self._make_client(channel_name="ao-channel")
         ws = self._make_workspace(team_id="T123", name="Acme")
         result = helpers.resolve_channel_references("see <#CSOURCE123>", client, ws)

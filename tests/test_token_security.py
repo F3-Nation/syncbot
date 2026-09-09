@@ -72,7 +72,7 @@ class TestEncryptedInstallationStore:
     def test_encrypt_installation_tokens_copy_not_original(self):
         from slack_sdk.oauth.installation_store.models import Installation
 
-        from helpers.encrypted_installation_store import _encrypt_installation_tokens
+        from helpers.encryption_installation_store import _encrypt_installation_tokens
 
         installation = Installation(
             app_id="A1",
@@ -94,7 +94,7 @@ class TestEncryptedInstallationStore:
     def test_decrypt_installation_tokens(self):
         from slack_sdk.oauth.installation_store.models import Installation
 
-        from helpers.encrypted_installation_store import _decrypt_installation_tokens
+        from helpers.encryption_installation_store import _decrypt_installation_tokens
 
         installation = Installation(
             app_id="A1",

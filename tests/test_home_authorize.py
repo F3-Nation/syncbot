@@ -138,6 +138,11 @@ class TestAuthorizeSection:
 
 
 class TestPermissionLists:
+    def test_labels_do_not_include_direct_messages_pins_or_bookmarks(self):
+        assert "Send direct messages" not in ALL_LABELS
+        assert "Pin Channel items" not in ALL_LABELS
+        assert "Channel bookmarks" not in ALL_LABELS
+
     def test_no_grants_puts_every_group_in_needed(self):
         from helpers.conversations import user_permission_lists
 
@@ -216,7 +221,7 @@ class TestHomeTabAdminGate:
         assert "SyncBot Configuration" in text
         assert "Refresh" in text
         assert "Create Group" not in text
-        assert "Publish Channel" not in text
+        assert "Create Sync" not in text
         assert "Settings" not in text
 
     def test_non_manager_who_is_fully_authorized_still_gets_refresh(self):
@@ -241,6 +246,9 @@ class TestHomeTabAdminGate:
 
         assert "Authorize SyncBot" in text
         assert "Create Group" in text
+        assert "Create Sync and Join Sync" in text
+        assert "Create Sync or Join Sync" in text
+        assert "Publish or Subscribe" not in text
         assert "This area of SyncBot is limited to Workspace managers" not in text
 
     def test_manager_who_is_fully_authorized_sees_no_authorize_section(self):

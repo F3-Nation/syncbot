@@ -170,7 +170,7 @@ def handle_backup_download(
             content=json_str,
             filename=f"syncbot-backup-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}.json",
             channel=dm_channel,
-            initial_comment=":nerd_face: Here is your SyncBot JSON backup. Keep this file secure.",
+            initial_comment=":floppy_disk: Here is your SyncBot JSON backup. Keep this file secure.",
         )
     except Exception as e:
         _logger.exception("backup_download failed: %s", e)

@@ -12,7 +12,7 @@ os.environ.setdefault("DATABASE_PASSWORD", "test")
 os.environ.setdefault("DATABASE_SCHEMA", "syncbot")
 os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-0-0")
 
-from handlers.groups import (  # noqa: E402
+from handlers.group import (  # noqa: E402
     handle_accept_group_invite,
     handle_decline_group_invite,
     handle_join_group_submit,
@@ -54,15 +54,15 @@ class TestAcceptGroupInviteAuthorization:
         acting = SimpleNamespace(id=acting_workspace_id, team_id="T1", bot_token=None, deleted_at=None)
 
         with (
-            patch("handlers.groups._get_authorized_workspace", return_value=("U1", acting)),
-            patch("handlers.groups.DbManager.get_record", side_effect=[member, group]),
-            patch("handlers.groups.DbManager.update_records") as update_records,
-            patch("handlers.groups.DbManager.find_records", return_value=[]),
-            patch("handlers.groups.helpers.get_workspace_by_id", return_value=acting),
-            patch("handlers.groups.helpers.resolve_workspace_name", return_value="WS"),
-            patch("handlers.groups._activate_group_membership"),
-            patch("handlers.groups._update_invite_dms"),
-            patch("handlers.groups.builders.refresh_home_tab_for_workspace"),
+            patch("handlers.group._get_authorized_workspace", return_value=("U1", acting)),
+            patch("handlers.group.DbManager.get_record", side_effect=[member, group]),
+            patch("handlers.group.DbManager.update_records") as update_records,
+            patch("handlers.group.DbManager.find_records", return_value=[]),
+            patch("handlers.group.helpers.get_workspace_by_id", return_value=acting),
+            patch("handlers.group.helpers.resolve_workspace_name", return_value="WS"),
+            patch("handlers.group._activate_group_membership"),
+            patch("handlers.group._update_invite_dms"),
+            patch("handlers.group.builders.refresh_home_tab_for_workspace"),
         ):
             handle_accept_group_invite(
                 _invite_body(actions.CONFIG_ACCEPT_GROUP_REQUEST), MagicMock(), MagicMock(), context={}
@@ -81,9 +81,9 @@ class TestAcceptGroupInviteAuthorization:
     def test_unauthorized_user_is_rejected(self):
         """When REQUIRE_ADMIN is on, _get_authorized_workspace returns None and nothing happens."""
         with (
-            patch("handlers.groups._get_authorized_workspace", return_value=None),
-            patch("handlers.groups.DbManager.get_record") as get_record,
-            patch("handlers.groups.DbManager.update_records") as update_records,
+            patch("handlers.group._get_authorized_workspace", return_value=None),
+            patch("handlers.group.DbManager.get_record") as get_record,
+            patch("handlers.group.DbManager.update_records") as update_records,
         ):
             handle_accept_group_invite(
                 _invite_body(actions.CONFIG_ACCEPT_GROUP_REQUEST), MagicMock(), MagicMock(), context={}
@@ -102,13 +102,13 @@ class TestDeclineGroupInviteAuthorization:
         acting = SimpleNamespace(id=acting_workspace_id, team_id="T1", bot_token=None, deleted_at=None)
 
         with (
-            patch("handlers.groups._get_authorized_workspace", return_value=("U1", acting)),
-            patch("handlers.groups.DbManager.get_record", side_effect=[member, group]),
-            patch("handlers.groups.DbManager.delete_records") as delete_records,
-            patch("handlers.groups.DbManager.find_records", return_value=[]),
-            patch("handlers.groups.helpers.get_workspace_by_id", return_value=acting),
-            patch("handlers.groups._update_invite_dms"),
-            patch("handlers.groups.builders.refresh_home_tab_for_workspace"),
+            patch("handlers.group._get_authorized_workspace", return_value=("U1", acting)),
+            patch("handlers.group.DbManager.get_record", side_effect=[member, group]),
+            patch("handlers.group.DbManager.delete_records") as delete_records,
+            patch("handlers.group.DbManager.find_records", return_value=[]),
+            patch("handlers.group.helpers.get_workspace_by_id", return_value=acting),
+            patch("handlers.group._update_invite_dms"),
+            patch("handlers.group.builders.refresh_home_tab_for_workspace"),
         ):
             handle_decline_group_invite(_invite_body(action_id), MagicMock(), MagicMock(), context={})
         return delete_records
@@ -138,14 +138,14 @@ class TestDeclineGroupInviteAuthorization:
         acting = SimpleNamespace(id=THIRD_PARTY_WS_ID, team_id="T1", bot_token=None, deleted_at=None)
 
         with (
-            patch("handlers.groups._get_authorized_workspace", return_value=("U1", acting)),
-            patch("handlers.groups.DbManager.get_record", side_effect=[member, group]),
-            patch("handlers.groups.DbManager.delete_records") as delete_records,
-            patch("handlers.groups.DbManager.find_records", return_value=[]),
-            patch("handlers.groups.helpers.is_workspace_owner", return_value=True),
-            patch("handlers.groups.helpers.get_workspace_by_id", return_value=acting),
-            patch("handlers.groups._update_invite_dms"),
-            patch("handlers.groups.builders.refresh_home_tab_for_workspace"),
+            patch("handlers.group._get_authorized_workspace", return_value=("U1", acting)),
+            patch("handlers.group.DbManager.get_record", side_effect=[member, group]),
+            patch("handlers.group.DbManager.delete_records") as delete_records,
+            patch("handlers.group.DbManager.find_records", return_value=[]),
+            patch("handlers.group.helpers.is_workspace_owner", return_value=True),
+            patch("handlers.group.helpers.get_workspace_by_id", return_value=acting),
+            patch("handlers.group._update_invite_dms"),
+            patch("handlers.group.builders.refresh_home_tab_for_workspace"),
         ):
             handle_decline_group_invite(
                 _invite_body(actions.CONFIG_CANCEL_GROUP_REQUEST), MagicMock(), MagicMock(), context={}
@@ -155,9 +155,9 @@ class TestDeclineGroupInviteAuthorization:
 
     def test_unauthorized_user_is_rejected(self):
         with (
-            patch("handlers.groups._get_authorized_workspace", return_value=None),
-            patch("handlers.groups.DbManager.get_record") as get_record,
-            patch("handlers.groups.DbManager.delete_records") as delete_records,
+            patch("handlers.group._get_authorized_workspace", return_value=None),
+            patch("handlers.group.DbManager.get_record") as get_record,
+            patch("handlers.group.DbManager.delete_records") as delete_records,
         ):
             handle_decline_group_invite(
                 _invite_body(actions.CONFIG_DECLINE_GROUP_REQUEST), MagicMock(), MagicMock(), context={}
@@ -207,13 +207,13 @@ class TestJoinGroupSubmit:
         }
 
         with (
-            patch("handlers.groups._get_authorized_workspace", return_value=("U1", workspace)),
-            patch("handlers.groups.forms.ENTER_GROUP_CODE_FORM.get_selected_values", return_value={}),
-            patch("handlers.groups.helpers._cache_get", return_value=0),
-            patch("handlers.groups.helpers._cache_set"),
-            patch("handlers.groups.DbManager.find_records", return_value=[]),
-            patch("handlers.groups.builders.refresh_home_tab_for_workspace"),
-            patch("handlers.groups._logger.warning") as warn_log,
+            patch("handlers.group._get_authorized_workspace", return_value=("U1", workspace)),
+            patch("handlers.group.forms.ENTER_GROUP_CODE_FORM.get_selected_values", return_value={}),
+            patch("handlers.group.helpers._cache_get", return_value=0),
+            patch("handlers.group.helpers._cache_set"),
+            patch("handlers.group.DbManager.find_records", return_value=[]),
+            patch("handlers.group.builders.refresh_home_tab_for_workspace"),
+            patch("handlers.group._logger.warning") as warn_log,
         ):
             handle_join_group_submit(body, client, logger, context={})
 

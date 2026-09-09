@@ -27,7 +27,7 @@ def client():
 class TestPickerBlock:
     def test_uses_native_conversations_select(self):
         with patch("handlers.channel_sync.helpers.allow_private_channels", return_value=False):
-            block = _channel_picker_block("Channel to Publish", actions.CONFIG_PUBLISH_CHANNEL_SELECT, team_id="T1")
+            block = _channel_picker_block("Channel", actions.CONFIG_CREATE_SYNC_SELECT, team_id="T1")
 
         rendered = block.as_form_field()
         assert rendered["element"]["type"] == "conversations_select"
@@ -35,7 +35,7 @@ class TestPickerBlock:
 
     def test_private_channels_included_when_policy_allows(self):
         with patch("handlers.channel_sync.helpers.allow_private_channels", return_value=True):
-            block = _channel_picker_block("Channel to Publish", actions.CONFIG_PUBLISH_CHANNEL_SELECT, team_id="T1")
+            block = _channel_picker_block("Channel", actions.CONFIG_CREATE_SYNC_SELECT, team_id="T1")
 
         include = block.as_form_field()["element"]["filter"]["include"]
         assert "private" in include
@@ -48,11 +48,11 @@ class TestPickerBlock:
             assert "Only public Channels can be synced" in _channel_picker_help_text(team_id="T1")
 
         with patch("handlers.channel_sync.helpers.allow_private_channels", return_value=False):
-            assert "receive the published Channel" in _channel_picker_help_text(team_id="T1", subscribe=True)
+            assert "join this Sync" in _channel_picker_help_text(team_id="T1", subscribe=True)
 
 
 class TestValidateChannelSelection:
-    ACTION = actions.CONFIG_PUBLISH_CHANNEL_SELECT
+    ACTION = actions.CONFIG_CREATE_SYNC_SELECT
 
     def test_missing_selection_is_an_error(self, client):
         result = _validate_channel_selection(client, None, self.ACTION)
@@ -63,32 +63,50 @@ class TestValidateChannelSelection:
         result = _validate_channel_selection(client, "__none__", self.ACTION)
         assert result["response_action"] == "errors"
 
-    def test_channel_already_synced_is_rejected(self, client):
-        with patch("handlers.channel_sync.DbManager.find_records", return_value=[object()]):
-            result = _validate_channel_selection(client, "C1", self.ACTION)
-
-        assert "already part of a Channel Sync" in result["errors"][self.ACTION]
-
-    def test_already_synced_check_is_global_not_workspace_scoped(self, client):
-        """A channel may belong to only one sync instance-wide.
-
-        ``get_sync_list`` resolves a channel to the first matching sync, so a
-        channel in two syncs has undefined send fan-out.
-        """
-        captured = {}
-
-        def fake_find_records(schema, filters):
-            captured["filters"] = filters
-            return []
-
+    def test_channel_in_another_sync_is_allowed(self, client):
         client.conversations_info.return_value = {"channel": {"is_private": False}}
         with (
-            patch("handlers.channel_sync.DbManager.find_records", side_effect=fake_find_records),
             patch("handlers.channel_sync.helpers.allow_private_channels", return_value=False),
         ):
             assert _validate_channel_selection(client, "C1", self.ACTION) is None
 
-        assert not any("workspace_id" in str(f) for f in captured["filters"])
+    def test_workspace_already_subscribed_to_source_is_rejected(self, client):
+        source = SimpleNamespace(workspace_id=1, channel_id="CSOURCE", publishes=True)
+        with (
+            patch("handlers.channel_sync.DbManager.find_records", return_value=[source]),
+            patch("handlers.channel_sync.helpers.already_subscribed_to_source", return_value=True),
+        ):
+            result = _validate_channel_selection(
+                client,
+                "C1",
+                self.ACTION,
+                workspace_id=2,
+                source_sync_id=42,
+            )
+
+        assert "already subscribes" in result["errors"][self.ACTION]
+
+    def test_duplicate_subscribe_checks_every_publisher_in_the_sync(self, client):
+        original = SimpleNamespace(workspace_id=1, channel_id="C_OLD", publishes=False)
+        second = SimpleNamespace(workspace_id=3, channel_id="C_NEW", publishes=True)
+        with (
+            patch("handlers.channel_sync.DbManager.find_records", return_value=[original, second]),
+            patch(
+                "handlers.channel_sync.helpers.already_subscribed_to_source",
+                side_effect=lambda **kwargs: kwargs["source_channel_id"] == "C_NEW",
+            ) as already,
+        ):
+            result = _validate_channel_selection(
+                client,
+                "C1",
+                self.ACTION,
+                workspace_id=2,
+                source_sync_id=42,
+            )
+
+        assert "already subscribes" in result["errors"][self.ACTION]
+        assert already.call_count == 1
+        assert already.call_args.kwargs["source_channel_id"] == "C_NEW"
 
     def test_eligible_public_channel_passes(self, client):
         client.conversations_info.return_value = {"channel": {"is_private": False}}
@@ -168,27 +186,17 @@ class TestValidateChannelSelection:
 
         assert "could not read that Channel" in result["errors"][self.ACTION]
 
-    def test_soft_deleted_sync_channel_does_not_block_reuse(self, client):
-        """Republishing a previously unpublished channel must remain possible."""
-        captured = {}
-
-        def fake_find_records(schema, filters):
-            captured["filters"] = filters
-            return []
-
+    def test_republishing_a_previously_used_channel_is_allowed(self, client):
         client.conversations_info.return_value = {"channel": {"is_private": False}}
         with (
-            patch("handlers.channel_sync.DbManager.find_records", side_effect=fake_find_records),
             patch("handlers.channel_sync.helpers.allow_private_channels", return_value=False),
         ):
             assert _validate_channel_selection(client, "C1", self.ACTION) is None
 
-        assert any("deleted_at IS NULL" in str(f) for f in captured["filters"])
 
-
-class TestSubscribeAckSurfacesErrors:
+class TestJoinSyncAckSurfacesErrors:
     def test_ineligible_channel_returns_errors_response(self):
-        from handlers.channel_sync import handle_subscribe_channel_submit_ack
+        from handlers.channel_sync import handle_join_sync_submit_ack
 
         client = MagicMock()
         workspace = SimpleNamespace(id=10, team_id="T1")
@@ -197,15 +205,21 @@ class TestSubscribeAckSurfacesErrors:
             patch("handlers.channel_sync._get_authorized_workspace", return_value=("U1", workspace)),
             patch("handlers.channel_sync._parse_private_metadata", return_value={"sync_id": 55}),
             patch("handlers.channel_sync._get_selected_conversation_or_option", return_value="Cdup"),
-            patch("handlers.channel_sync.DbManager.find_records", return_value=[object()]),
+            patch(
+                "handlers.channel_sync._validate_channel_selection",
+                return_value={
+                    "response_action": "errors",
+                    "errors": {actions.CONFIG_JOIN_SYNC_SELECT: "duplicate"},
+                },
+            ),
         ):
-            result = handle_subscribe_channel_submit_ack({}, client, {})
+            result = handle_join_sync_submit_ack({}, client, {})
 
         assert result["response_action"] == "errors"
-        assert actions.CONFIG_SUBSCRIBE_CHANNEL_SELECT in result["errors"]
+        assert actions.CONFIG_JOIN_SYNC_SELECT in result["errors"]
 
     def test_missing_sync_id_does_not_claim_success(self):
-        from handlers.channel_sync import handle_subscribe_channel_submit_ack
+        from handlers.channel_sync import handle_join_sync_submit_ack
 
         client = MagicMock()
         workspace = SimpleNamespace(id=10, team_id="T1")
@@ -214,10 +228,10 @@ class TestSubscribeAckSurfacesErrors:
             patch("handlers.channel_sync._get_authorized_workspace", return_value=("U1", workspace)),
             patch("handlers.channel_sync._parse_private_metadata", return_value={}),
         ):
-            assert handle_subscribe_channel_submit_ack({}, client, {}) is None
+            assert handle_join_sync_submit_ack({}, client, {}) is None
 
     def test_eligible_channel_acks_empty(self):
-        from handlers.channel_sync import handle_subscribe_channel_submit_ack
+        from handlers.channel_sync import handle_join_sync_submit_ack
 
         client = MagicMock()
         client.conversations_info.return_value = {"channel": {"is_private": False}}
@@ -227,32 +241,31 @@ class TestSubscribeAckSurfacesErrors:
             patch("handlers.channel_sync._get_authorized_workspace", return_value=("U1", workspace)),
             patch("handlers.channel_sync._parse_private_metadata", return_value={"sync_id": 55}),
             patch("handlers.channel_sync._get_selected_conversation_or_option", return_value="Cnew"),
+            patch("handlers.channel_sync.DbManager.get_record", return_value=None),
             patch("handlers.channel_sync.DbManager.find_records", return_value=[]),
             patch("handlers.channel_sync.helpers.allow_private_channels", return_value=False),
         ):
-            assert handle_subscribe_channel_submit_ack({}, client, {}) is None
+            assert handle_join_sync_submit_ack({}, client, {}) is None
 
 
-class TestSubscribeIsRoutedForDeferredAck:
-    def test_subscribe_submit_has_an_ack_handler(self):
+class TestJoinSyncIsRoutedForDeferredAck:
+    def test_join_sync_submit_has_an_ack_handler(self):
         """Without a VIEW_ACK_MAPPER entry the field errors never reach Slack."""
         import handlers
         import routing
 
-        assert routing.VIEW_ACK_MAPPER[actions.CONFIG_SUBSCRIBE_CHANNEL_SUBMIT] is (
-            handlers.handle_subscribe_channel_submit_ack
-        )
+        assert routing.VIEW_ACK_MAPPER[actions.CONFIG_JOIN_SYNC_SUBMIT] is (handlers.handle_join_sync_submit_ack)
 
 
-class TestPublishSubscribeFormsRespectPolicy:
-    """Publish / Subscribe modals share the conversations picker policy."""
+class TestCreateJoinFormsRespectPolicy:
+    """Create Sync / Join Sync modals share the conversations picker policy."""
 
     def test_deep_copied_form_can_be_switched_to_public_only(self):
         import copy
 
         from slack import forms
 
-        form = copy.deepcopy(forms.PUBLISH_CHANNEL_FORM)
+        form = copy.deepcopy(forms.CREATE_SYNC_FORM)
         form.set_conversations_include_private(False)
         rendered = form.as_form_field()
 
@@ -265,7 +278,7 @@ class TestPublishSubscribeFormsRespectPolicy:
 
         from slack import forms
 
-        form = copy.deepcopy(forms.SUBSCRIBE_CHANNEL_FORM)
+        form = copy.deepcopy(forms.JOIN_SYNC_FORM)
         form.set_conversations_include_private(True)
         rendered = form.as_form_field()
 

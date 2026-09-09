@@ -59,8 +59,8 @@ class TestFederationMessageInbound:
             },
         }
         fed_ws = SimpleNamespace(instance_id="remote-instance")
-        sync_channel = SimpleNamespace(id=101, channel_id="C123")
-        workspace = SimpleNamespace(id=55, bot_token="enc-token")
+        sync_channel = SimpleNamespace(id=101, channel_id="C123", publishes=False, subscribes=True)
+        workspace = SimpleNamespace(id=55, team_id="T_DEST", bot_token="enc-token")
 
         with (
             patch.object(federation_api, "_resolve_channel_for_federated", return_value=(sync_channel, workspace)),
@@ -72,7 +72,10 @@ class TestFederationMessageInbound:
             ),
             patch.object(federation_api, "_resolve_mentions_for_federated", side_effect=lambda t, *_: t),
             patch.object(federation_api.helpers, "resolve_channel_references", side_effect=lambda t, *a, **k: t),
-            patch.object(federation_api.helpers, "post_message", return_value={"ts": "99.000001"}) as post_message_mock,
+            patch("helpers.slack_write.decrypt_bot_token", return_value="xoxb-test"),
+            patch("helpers.slack_write.get_user_token", return_value=None),
+            patch("helpers.slack_write.post_message", return_value={"ts": "99.000001"}) as post_message_mock,
+            patch.object(federation_api.DbManager, "create_records"),
         ):
             status, resp = federation_api.handle_message(body, fed_ws)
 
@@ -97,8 +100,9 @@ class TestFederationReactionFallback:
         sync_channel = SimpleNamespace(
             id=101,
             channel_id="C123",
-            reaction_direction="both",
             reaction_style="threaded_and_direct",
+            publishes=False,
+            subscribes=True,
         )
         workspace = SimpleNamespace(id=55, bot_token="enc-token")
         post_meta = SimpleNamespace(ts=123.456)
@@ -106,7 +110,7 @@ class TestFederationReactionFallback:
         with (
             patch.object(federation_api, "_resolve_channel_for_federated", return_value=(sync_channel, workspace)),
             patch.object(federation_api, "_find_post_records", return_value=[post_meta]),
-            patch("helpers.reactions.apply_reaction_to_target", return_value=apply_result) as apply_mock,
+            patch("helpers.reaction.apply_reaction_to_target", return_value=apply_result) as apply_mock,
             patch.object(federation_api.DbManager, "create_records"),
         ):
             status, resp = federation_api.handle_message_react(body, fed_ws)
@@ -133,9 +137,13 @@ class TestFederationReactionFallback:
             "action": "add",
             "user_name": "Alice",
         }
-        status, resp, _apply_mock = self._react(body, apply_result=("direct", None))
+        status, resp, apply_mock = self._react(
+            body,
+            apply_result=("direct", None),
+        )
         assert status == 200
         assert resp["applied"] == 1
+        apply_mock.assert_called_once()
 
     def test_skipped_apply_is_not_counted(self):
         body = {
@@ -149,7 +157,7 @@ class TestFederationReactionFallback:
         assert resp["applied"] == 0
         apply_mock.assert_called_once()
 
-    def test_receive_off_skips_without_calling_apply(self):
+    def test_not_subscribed_skips_without_calling_apply(self):
         body = {
             "post_id": "post-1",
             "channel_id": "C123",
@@ -160,15 +168,16 @@ class TestFederationReactionFallback:
         sync_channel = SimpleNamespace(
             id=101,
             channel_id="C123",
-            reaction_direction="off",
-            reaction_style=None,
+            reaction_style="direct_only",
+            publishes=True,
+            subscribes=False,
         )
         workspace = SimpleNamespace(id=55, bot_token="enc-token")
 
         with (
             patch.object(federation_api, "_resolve_channel_for_federated", return_value=(sync_channel, workspace)),
             patch.object(federation_api, "_find_post_records", return_value=[SimpleNamespace(ts=1.0)]),
-            patch("helpers.reactions.apply_reaction_to_target") as apply_mock,
+            patch("helpers.reaction.apply_reaction_to_target") as apply_mock,
         ):
             status, resp = federation_api.handle_message_react(body, fed_ws)
 
@@ -191,8 +200,9 @@ class TestFederationInboundTokenLookup:
         sync_channel = SimpleNamespace(
             id=101,
             channel_id="C123",
-            reaction_direction="both",
             reaction_style="direct_only",
+            publishes=False,
+            subscribes=True,
         )
         workspace = SimpleNamespace(id=55, team_id="T_DEST", bot_token="enc-token")
         post_meta = SimpleNamespace(ts=123.456)
@@ -204,9 +214,9 @@ class TestFederationInboundTokenLookup:
             patch.object(federation_api, "_ensure_federated_author_mapped", return_value="U_LOCAL"),
             patch.object(federation_api.helpers, "decrypt_bot_token", return_value="xoxb-bot"),
             patch.object(federation_api.helpers, "get_user_info", return_value=("Local Alice", None)),
-            patch("helpers.reactions.get_user_token", return_value="xoxp-local") as get_token,
-            patch("helpers.reactions.decrypt_bot_token", return_value="xoxb-bot"),
-            patch("helpers.reactions.WebClient", return_value=user_client),
+            patch("helpers.reaction.get_user_token", return_value="xoxp-local") as get_token,
+            patch("helpers.reaction.decrypt_bot_token", return_value="xoxb-bot"),
+            patch("helpers.reaction.WebClient", return_value=user_client),
         ):
             status, resp = federation_api.handle_message_react(body, fed_ws)
 
@@ -229,8 +239,9 @@ class TestFederationInboundTokenLookup:
         sync_channel = SimpleNamespace(
             id=101,
             channel_id="C123",
-            reaction_direction="both",
             reaction_style="direct_only",
+            publishes=False,
+            subscribes=True,
         )
         workspace = SimpleNamespace(id=55, team_id="T_DEST", bot_token="enc-token")
         post_meta = SimpleNamespace(ts=123.456)
@@ -238,9 +249,9 @@ class TestFederationInboundTokenLookup:
         with (
             patch.object(federation_api, "_resolve_channel_for_federated", return_value=(sync_channel, workspace)),
             patch.object(federation_api, "_find_post_records", return_value=[post_meta]),
-            patch("helpers.reactions.get_user_token", return_value=None),
-            patch("helpers.reactions.decrypt_bot_token") as decrypt,
-            patch("helpers.reactions.WebClient") as web_client,
+            patch("helpers.reaction.get_user_token", return_value=None),
+            patch("helpers.reaction.decrypt_bot_token") as decrypt,
+            patch("helpers.reaction.WebClient") as web_client,
         ):
             status, resp = federation_api.handle_message_react(body, fed_ws)
 
@@ -248,6 +259,44 @@ class TestFederationInboundTokenLookup:
         assert resp["applied"] == 0
         decrypt.assert_not_called()
         web_client.assert_not_called()
+
+    def test_off_inbound_unreact_does_not_delete_notices(self):
+        body = {
+            "post_id": "post-1",
+            "channel_id": "C123",
+            "reaction": "thumbsup",
+            "action": "remove",
+            "user_id": "U_REMOTE",
+            "user_name": "Remote Alice",
+        }
+        fed_ws = SimpleNamespace(instance_id="remote-instance")
+        sync_channel = SimpleNamespace(
+            id=101,
+            channel_id="C123",
+            reaction_style="off",
+            publishes=False,
+            subscribes=True,
+        )
+        workspace = SimpleNamespace(id=55, team_id="T_DEST", bot_token="enc-token")
+        post_meta = SimpleNamespace(ts=123.456, post_id="post-1")
+
+        with (
+            patch.object(federation_api, "_resolve_channel_for_federated", return_value=(sync_channel, workspace)),
+            patch.object(federation_api, "_find_post_records", return_value=[post_meta]),
+            patch.object(federation_api, "_ensure_federated_author_mapped", return_value=None),
+            patch("helpers.reaction.get_user_token") as get_token,
+            patch("helpers.reaction.decrypt_bot_token") as decrypt,
+            patch("helpers.reaction.WebClient") as web_client,
+            patch("helpers.reaction.delete_notices_for_unreact") as leftover,
+        ):
+            status, resp = federation_api.handle_message_react(body, fed_ws)
+
+        assert status == 200
+        assert resp["applied"] == 0
+        get_token.assert_not_called()
+        decrypt.assert_not_called()
+        web_client.assert_not_called()
+        leftover.assert_not_called()
 
     def test_hybrid_inbound_without_token_probes_then_threads(self):
         body = {
@@ -262,8 +311,9 @@ class TestFederationInboundTokenLookup:
         sync_channel = SimpleNamespace(
             id=101,
             channel_id="C123",
-            reaction_direction="both",
             reaction_style="threaded_and_direct",
+            publishes=False,
+            subscribes=True,
         )
         workspace = SimpleNamespace(id=55, team_id="T_DEST", bot_token="enc-token")
         post_meta = SimpleNamespace(ts=123.456, post_id="post-1")
@@ -275,9 +325,9 @@ class TestFederationInboundTokenLookup:
             patch.object(federation_api, "_resolve_channel_for_federated", return_value=(sync_channel, workspace)),
             patch.object(federation_api, "_find_post_records", return_value=[post_meta]),
             patch.object(federation_api, "_ensure_federated_author_mapped", return_value=None),
-            patch("helpers.reactions.get_user_token", return_value=None),
-            patch("helpers.reactions.decrypt_bot_token", return_value="xoxb-bot"),
-            patch("helpers.reactions.WebClient", return_value=bot_client),
+            patch("helpers.reaction.get_user_token", return_value=None),
+            patch("helpers.reaction.decrypt_bot_token", return_value="xoxb-bot"),
+            patch("helpers.reaction.WebClient", return_value=bot_client),
             patch.object(federation_api.DbManager, "create_records"),
         ):
             status, resp = federation_api.handle_message_react(body, fed_ws)
@@ -302,8 +352,9 @@ class TestFederationInboundTokenLookup:
         sync_channel = SimpleNamespace(
             id=101,
             channel_id="C123",
-            reaction_direction="both",
             reaction_style="threaded_and_direct",
+            publishes=False,
+            subscribes=True,
         )
         workspace = SimpleNamespace(id=55, team_id="T_DEST", bot_token="enc-token")
         post_meta = SimpleNamespace(ts=123.456, post_id="post-1")
@@ -333,12 +384,12 @@ class TestFederationInboundTokenLookup:
             patch.object(federation_api, "_resolve_channel_for_federated", return_value=(sync_channel, workspace)),
             patch.object(federation_api, "_find_post_records", return_value=[post_meta]),
             patch.object(federation_api, "_ensure_federated_author_mapped", return_value=None),
-            patch("helpers.reactions.get_user_token", return_value=None),
-            patch("helpers.reactions.decrypt_bot_token", return_value="xoxb-bot"),
-            patch("helpers.reactions.WebClient", return_value=bot_client),
-            patch("helpers.reaction_notices.equivalent_actor_pairs", return_value={(55, "U_REMOTE")}),
-            patch("helpers.reaction_notices.DbManager.find_records", side_effect=_find_records),
-            patch("helpers.reaction_notices.DbManager.delete_records") as delete_records,
+            patch("helpers.reaction.get_user_token", return_value=None),
+            patch("helpers.reaction.decrypt_bot_token", return_value="xoxb-bot"),
+            patch("helpers.reaction.WebClient", return_value=bot_client),
+            patch("helpers.reaction_notice.equivalent_actor_pairs", return_value={(55, "U_REMOTE")}),
+            patch("helpers.reaction_notice.DbManager.find_records", side_effect=_find_records),
+            patch("helpers.reaction_notice.DbManager.delete_records") as delete_records,
         ):
             status, resp = federation_api.handle_message_react(body, fed_ws)
 

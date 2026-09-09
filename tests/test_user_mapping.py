@@ -15,8 +15,8 @@ from builders.user_mapping import (  # noqa: E402
     build_user_mapping_entry,
     build_user_mapping_list_blocks,
 )
-from handlers.channel_sync import handle_publish_channel_submit_work  # noqa: E402
-from handlers.groups import _activate_group_membership  # noqa: E402
+from handlers.channel_sync import handle_create_sync_submit_work  # noqa: E402
+from handlers.group import _activate_group_membership  # noqa: E402
 from handlers.users import (  # noqa: E402
     handle_user_mapping_auto_map,
     handle_user_mapping_edit_submit,
@@ -356,10 +356,10 @@ class TestJoinSeedsOnly:
         member = SimpleNamespace(workspace_id=2)
 
         with (
-            patch("handlers.groups.DbManager.find_records", return_value=[member]),
-            patch("handlers.groups.helpers.get_workspace_by_id", return_value=partner),
-            patch("handlers.groups.helpers.seed_user_mappings") as seed,
-            patch("handlers.groups.helpers.run_auto_map_for_workspace") as auto_map,
+            patch("handlers.group.DbManager.find_records", return_value=[member]),
+            patch("handlers.group.helpers.get_workspace_by_id", return_value=partner),
+            patch("handlers.group.helpers.seed_user_mappings") as seed,
+            patch("handlers.group.helpers.run_auto_map_for_workspace") as auto_map,
         ):
             _activate_group_membership(MagicMock(), workspace, group)
 
@@ -367,8 +367,8 @@ class TestJoinSeedsOnly:
         auto_map.assert_not_called()
 
 
-class TestPublishAnnouncement:
-    def test_publish_posts_announcement_after_membership(self):
+class TestCreateSyncAnnouncement:
+    def test_create_sync_posts_announcement_after_membership(self):
         workspace = SimpleNamespace(id=10, team_id="T1")
         client = MagicMock()
         body = {"view": {"team_id": "T1"}, "user": {"id": "U1"}}
@@ -396,20 +396,19 @@ class TestPublishAnnouncement:
             patch("handlers.channel_sync.builders.refresh_home_tab_for_workspace"),
             patch("handlers.channel_sync._refresh_group_member_homes"),
         ):
-            handle_publish_channel_submit_work(body, client, MagicMock(), {})
+            handle_create_sync_submit_work(body, client, MagicMock(), {})
 
         assert client.chat_postMessage.called
         announce = [c for c in client.chat_postMessage.call_args_list if c.kwargs.get("channel") == "Cpub"]
         assert len(announce) == 1
         text = announce[0].kwargs["text"]
-        assert "published this Channel" in text
-        assert "*Region* SyncBot Group" in text
+        assert "created a Sync for this Channel" in text
         assert "Ada" in text
 
 
 class TestEnsureMappedTargetUserId:
-    def test_unique_dest_directory_email_persists_without_lookup(self):
-        dest = SimpleNamespace(
+    def test_unique_target_directory_email_persists_without_lookup(self):
+        target = SimpleNamespace(
             slack_user_id="U_DEST",
             email="same@ex.com",
             real_name="Ada",
@@ -424,7 +423,7 @@ class TestEnsureMappedTargetUserId:
                 return_value={"email": "same@ex.com", "display_name": "Ada", "real_name": "Ada"},
             ),
             patch("helpers.user_map._get_source_profile_full") as source_slack,
-            patch("helpers.user_map.DbManager.find_records", return_value=[dest]),
+            patch("helpers.user_map.DbManager.find_records", return_value=[target]),
             patch("helpers.user_map.DbManager.create_record") as create,
             patch("helpers.user_map.get_workspace_by_id", return_value=SimpleNamespace(team_id="TDEST")),
             patch("helpers.export_import.invalidate_home_tab_caches_for_team") as invalidate,
@@ -467,7 +466,7 @@ class TestEnsureMappedTargetUserId:
         create.assert_called_once()
         assert create.call_args.args[0].map_method == "email"
 
-    def test_ambiguous_dest_email_persists_none_stub(self):
+    def test_ambiguous_target_email_persists_none_stub(self):
         a = SimpleNamespace(
             slack_user_id="U1", email="dup@ex.com", real_name="A", display_name="A", normalized_name="A"
         )
@@ -554,7 +553,7 @@ class TestEnsureMappedTargetUserId:
         assert uid is None
 
     def test_home_invalidate_failure_still_returns_mapped_id(self):
-        dest = SimpleNamespace(
+        target = SimpleNamespace(
             slack_user_id="U_DEST",
             email="same@ex.com",
             real_name="Ada",
@@ -567,7 +566,7 @@ class TestEnsureMappedTargetUserId:
                 "helpers.user_map._source_profile_from_directory",
                 return_value={"email": "same@ex.com", "display_name": "Ada", "real_name": "Ada"},
             ),
-            patch("helpers.user_map.DbManager.find_records", return_value=[dest]),
+            patch("helpers.user_map.DbManager.find_records", return_value=[target]),
             patch("helpers.user_map.DbManager.create_record"),
             patch("helpers.user_map.get_workspace_by_id", side_effect=RuntimeError("db down")),
         ):
@@ -576,11 +575,11 @@ class TestEnsureMappedTargetUserId:
 
 
 class TestSyncedMessageDisplayName:
-    def test_mapped_author_uses_dest_display_name(self):
+    def test_mapped_author_uses_target_display_name(self):
         target_client = MagicMock()
         with (
             patch("helpers.user_map.ensure_mapped_target_user_id", return_value="U_DEST"),
-            patch("helpers.user_map.get_user_info", return_value=("Local Nacho", "https://dest/n.png")),
+            patch("helpers.user_map.get_user_info", return_value=("Local Nacho", "https://target/n.png")),
         ):
             name, icon, mapped, mapped_id = get_display_name_and_icon_for_synced_message(
                 "U_SRC",
@@ -592,10 +591,10 @@ class TestSyncedMessageDisplayName:
             )
         assert mapped is True
         assert name == "Local Nacho"
-        assert icon == "https://dest/n.png"
+        assert icon == "https://target/n.png"
         assert mapped_id == "U_DEST"
 
-    def test_mapped_author_stays_mapped_if_dest_profile_missing(self):
+    def test_mapped_author_stays_mapped_if_target_profile_missing(self):
         target_client = MagicMock()
         with (
             patch("helpers.user_map.ensure_mapped_target_user_id", return_value="U_DEST"),
@@ -631,8 +630,8 @@ class TestSyncedMessageDisplayName:
 
 
 class TestAuthorBeforeMentions:
-    def test_same_instance_dest_maps_author_before_mention_rewrite(self):
-        from handlers.messages import _same_instance_dest_post
+    def test_same_instance_target_maps_author_before_mention_rewrite(self):
+        from helpers.slack_write import slack_write_create
 
         order: list[str] = []
 
@@ -651,25 +650,24 @@ class TestAuthorBeforeMentions:
             reply_broadcast=False,
         )
         with (
-            patch("handlers.messages.helpers.decrypt_bot_token", return_value="xoxb"),
-            patch("handlers.messages.WebClient"),
-            patch("handlers.messages.helpers.get_display_name_and_icon_for_synced_message", side_effect=_display),
-            patch("handlers.messages.helpers.apply_mentioned_users", side_effect=_mentions),
-            patch("handlers.messages.helpers.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.get_workspace_by_id", return_value=None),
-            patch("handlers.messages.helpers.post_message", return_value={"ts": "2.0"}),
+            patch("helpers.slack_write.decrypt_bot_token", return_value="xoxb"),
+            patch("helpers.slack_write.WebClient"),
+            patch("helpers.slack_write.get_display_name_and_icon_for_synced_message", side_effect=_display),
+            patch("helpers.slack_write.apply_mentioned_users", side_effect=_mentions),
+            patch("helpers.slack_write.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
+            patch("helpers.workspace.get_workspace_by_id", return_value=None),
+            patch("helpers.slack_write.post_message", return_value={"ts": "2.0"}),
         ):
-            _same_instance_dest_post(
-                body={"event": {"ts": "1.0"}},
-                client=MagicMock(),
-                ctx=ctx,
-                photo_blocks=[],
-                direct_files=None,
+            slack_write_create(
+                envelope={
+                    "source_workspace_id": 1,
+                    "source_user_id": "U_SRC",
+                    "user_name": "Ada",
+                    "workspace_name": "A",
+                    "text": ctx["msg_text"],
+                },
                 sync_channel=SimpleNamespace(channel_id="C_TGT", id=2),
-                workspace=SimpleNamespace(id=2, bot_token="enc"),
-                source_workspace_id=1,
-                user_name="Ada",
-                user_profile_url=None,
-                workspace_name="A",
+                workspace=SimpleNamespace(id=2, team_id="T2", bot_token="enc"),
+                source_client=MagicMock(),
             )
         assert order == ["author", "mentions"]

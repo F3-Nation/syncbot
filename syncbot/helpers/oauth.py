@@ -15,7 +15,7 @@ from slack_sdk.oauth.state_store.sqlalchemy import SQLAlchemyOAuthStateStore
 
 import constants
 from helpers._cache import _cache_get, _cache_set
-from helpers.encrypted_installation_store import EncryptedSQLAlchemyInstallationStore
+from helpers.encryption_installation_store import EncryptedSQLAlchemyInstallationStore
 from slack_manifest_scopes import USER_SCOPES
 
 _logger = logging.getLogger(__name__)

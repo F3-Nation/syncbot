@@ -1,4 +1,4 @@
-"""Channel sync handlers — publish, unpublish, subscribe, pause, resume, stop."""
+"""Channel sync handlers — create, join, edit, pause, resume, leave."""
 
 import contextlib
 import logging
@@ -29,18 +29,43 @@ from slack.blocks import section
 _logger = logging.getLogger(__name__)
 
 
-def _reaction_direction_block(action_id: str, *, initial: str = constants.REACTION_DIRECTION_BOTH) -> orm.InputBlock:
+_PARTICIPATION_ACTIONS = (actions.CONFIG_SYNC_PARTICIPATION,)
+_CREATE_CHANNEL_ACTIONS = (actions.CONFIG_CREATE_SYNC_SELECT,)
+_JOIN_CHANNEL_ACTIONS = (actions.CONFIG_JOIN_SYNC_SELECT,)
+_REACTION_STYLE_ACTIONS = (actions.CONFIG_SYNC_REACTION_STYLE,)
+
+
+def _participation_block(
+    *,
+    mode: str,
+    publishes: bool = True,
+    subscribes: bool = True,
+) -> orm.InputBlock:
+    """Choose this channel's source/target participation in a sync."""
+    create_options = [
+        orm.SelectorOption(name="Publish only", value="publish_only"),
+        orm.SelectorOption(name="Publish and Subscribe", value="publish_and_subscribe"),
+    ]
+    all_options = [
+        orm.SelectorOption(name="Publish only", value="publish_only"),
+        orm.SelectorOption(name="Subscribe only", value="subscribe_only"),
+        orm.SelectorOption(name="Publish and Subscribe", value="publish_and_subscribe"),
+    ]
+    options = create_options if mode == "create" else all_options
+    if publishes and not subscribes:
+        initial = "publish_only"
+    elif subscribes and not publishes:
+        initial = "subscribe_only"
+    else:
+        initial = "publish_and_subscribe"
+    if mode == "create" and initial == "subscribe_only":
+        initial = "publish_and_subscribe"
     return orm.InputBlock(
-        label="Reaction direction",
-        action=action_id,
+        label="Participation",
+        action=actions.CONFIG_SYNC_PARTICIPATION,
         element=orm.RadioButtonsElement(
             initial_value=initial,
-            options=[
-                orm.SelectorOption(name="Send and receive", value=constants.REACTION_DIRECTION_BOTH),
-                orm.SelectorOption(name="Send only", value=constants.REACTION_DIRECTION_SEND),
-                orm.SelectorOption(name="Receive only", value=constants.REACTION_DIRECTION_RECEIVE),
-                orm.SelectorOption(name="No reactions", value=constants.REACTION_DIRECTION_OFF),
-            ],
+            options=options,
         ),
         optional=False,
     )
@@ -65,6 +90,10 @@ def _reaction_style_block(
                     name="Direct — native emoji on the synced message",
                     value=constants.REACTION_STYLE_DIRECT_ONLY,
                 ),
+                orm.SelectorOption(
+                    name="Off — do not apply incoming reactions",
+                    value=constants.REACTION_STYLE_OFF,
+                ),
             ],
         ),
         optional=False,
@@ -73,40 +102,220 @@ def _reaction_style_block(
 
 def _valid_reaction_style(value: str | None) -> str | None:
     raw = (value or "").strip()
-    if raw in (constants.REACTION_STYLE_DIRECT_ONLY, constants.REACTION_STYLE_THREADED_AND_DIRECT):
+    if raw in (
+        constants.REACTION_STYLE_DIRECT_ONLY,
+        constants.REACTION_STYLE_THREADED_AND_DIRECT,
+        constants.REACTION_STYLE_OFF,
+    ):
         return raw
     return None
 
 
-def _parse_reaction_fields(body: dict, metadata: dict, *, style_action: str) -> tuple[str, str | None]:
-    from helpers.reactions import default_reaction_style_for_new_channel, direction_receives
+def _participation_from_value(value: str | None) -> tuple[bool, bool]:
+    return helpers.participation_flags(value)
 
-    direction = metadata.get("reaction_direction") or constants.REACTION_DIRECTION_BOTH
-    if not direction_receives(direction):
-        return direction, None
-    style = _valid_reaction_style(_get_selected_option_value(body, style_action))
-    if style is None:
-        style = default_reaction_style_for_new_channel(direction)
-    return direction, style
+
+def _participation_from_body(body: dict) -> tuple[bool, bool]:
+    for action in _PARTICIPATION_ACTIONS:
+        value = _get_selected_option_value(body, action)
+        if value:
+            return helpers.participation_flags(value)
+    return True, True
+
+
+def _selected_channel(body: dict, action_ids: tuple[str, ...]) -> tuple[str | None, str]:
+    for action_id in action_ids:
+        channel_id = _get_selected_conversation_or_option(body, action_id)
+        if channel_id:
+            return channel_id, action_id
+    return None, action_ids[0]
+
+
+def _parse_reaction_fields(body: dict, *, style_action: str | None = None) -> str:
+    """Reaction type from the form. Always shown; unused until the Channel subscribes."""
+    from helpers.reaction import default_reaction_style_for_new_channel
+
+    actions_to_try = (style_action,) if style_action else _REACTION_STYLE_ACTIONS
+    for action in actions_to_try:
+        if not action:
+            continue
+        style = _valid_reaction_style(_get_selected_option_value(body, action))
+        if style:
+            return style
+    return default_reaction_style_for_new_channel(subscribes=True)
+
+
+def _group_name(group_id: int | None) -> str | None:
+    if not group_id:
+        return None
+    group = DbManager.get_record(schemas.WorkspaceGroup, group_id)
+    name = getattr(group, "name", None) if group else None
+    return str(name).strip() if name else None
+
+
+def _publisher_sync_channel(sync_id: int) -> schemas.SyncChannel | None:
+    rows = DbManager.find_records(
+        schemas.SyncChannel,
+        [schemas.SyncChannel.sync_id == int(sync_id), schemas.SyncChannel.deleted_at.is_(None)],
+    )
+    return next((row for row in rows if helpers.channel_publishes(row)), rows[0] if rows else None)
+
+
+def _admin_workspace_label(client: WebClient, user_id: str, workspace) -> str:
+    """``Name (Workspace)`` for in-channel notices."""
+    name, _ = helpers.format_admin_label(client, user_id, workspace)
+    ws_name = getattr(workspace, "workspace_name", None) if workspace else None
+    if not ws_name and workspace is not None and hasattr(workspace, "bot_token"):
+        with contextlib.suppress(Exception):
+            ws_name = helpers.resolve_workspace_name(workspace)
+    if ws_name:
+        return f"{name} ({ws_name})"
+    return name
+
+
+def _create_sync_notice(admin_name: str, publishes: bool, subscribes: bool) -> str:
+    first = f"*{admin_name}* created a Sync for this Channel."
+    if publishes and subscribes:
+        second = "This Channel will send and receive messages between Workspaces that join."
+    else:
+        second = "Messages from this Channel will be sent to Workspaces that join."
+    return f":arrows_counterclockwise: {first} {second}"
+
+
+def _flow_sentence(
+    *,
+    here_publishes: bool,
+    here_subscribes: bool,
+    there_publishes: bool,
+    there_subscribes: bool,
+) -> str:
+    to_them = here_publishes and there_subscribes
+    to_here = there_publishes and here_subscribes
+    if to_them and to_here:
+        return "Messages will flow both ways between these Channels."
+    if to_them:
+        return "Messages from here will be sent to the Channel in the other Workspace."
+    if to_here:
+        return "Messages from that Channel will appear here."
+    return "Messages will not be exchanged between these Channels."
+
+
+def _join_notice(
+    *,
+    admin_label: str,
+    other_ref: str,
+    here_publishes: bool,
+    here_subscribes: bool,
+    there_publishes: bool,
+    there_subscribes: bool,
+    joined: bool,
+) -> str:
+    if joined:
+        first = f"*{admin_label}* subscribed *{other_ref}* to this Channel."
+    else:
+        first = f"*{admin_label}* subscribed this Channel to *{other_ref}*."
+    second = _flow_sentence(
+        here_publishes=here_publishes,
+        here_subscribes=here_subscribes,
+        there_publishes=there_publishes,
+        there_subscribes=there_subscribes,
+    )
+    return f":arrows_counterclockwise: {first} {second}"
+
+
+def _is_last_publisher(channels: list, workspace_id: int) -> bool:
+    publishers = [row for row in channels if helpers.channel_publishes(row)]
+    mine = [row for row in publishers if row.workspace_id == workspace_id]
+    others = [row for row in publishers if row.workspace_id != workspace_id]
+    return bool(mine) and not others
+
+
+def _sync_id_from_action(body: dict, prefixes: tuple[str, ...]) -> int | None:
+    raw = helpers.safe_get(body, "actions", 0, "value")
+    try:
+        if raw is not None and str(raw).strip() != "":
+            return int(raw)
+    except (TypeError, ValueError):
+        pass
+    action_id = helpers.safe_get(body, "actions", 0, "action_id") or ""
+    for prefix in prefixes:
+        if action_id.startswith(prefix + "_"):
+            try:
+                return int(action_id[len(prefix) + 1 :])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _relationship_context(
+    *,
+    group_id: int | None = None,
+    local_channel_id: str | None = None,
+    local_workspace=None,
+    published_channel: schemas.SyncChannel | None = None,
+    published_workspace=None,
+) -> orm.ContextBlock | None:
+    """Local Channel, published source, and group — whichever this modal knows."""
+    lines: list[str] = []
+    if local_channel_id:
+        lines.append(f"Channel: {_format_channel_ref(local_channel_id, local_workspace, is_local=True)}")
+    if published_channel is not None:
+        lines.append(
+            "Published Channel: "
+            + _format_channel_ref(published_channel.channel_id, published_workspace, is_local=False)
+        )
+    name = _group_name(group_id)
+    if name:
+        lines.append(f"Group: `{name}`")
+    if not lines:
+        return None
+    return block_context("\n".join(lines))
+
+
+def _participation_help(*, mode: str) -> str:
+    if mode == "create":
+        return (
+            "Publish only sends this Channel's messages to Workspaces that join. "
+            "Publish and Subscribe also receives messages from Workspaces that join."
+        )
+    return (
+        "Subscribe only receives messages from this Sync. Publish only sends this Channel's "
+        "messages without receiving. Publish and Subscribe exchanges messages both ways."
+    )
+
+
+def _reaction_style_help(*, first_time: bool) -> str:
+    base = (
+        "Reaction type applies while this Channel subscribes. "
+        "Off does not apply incoming reactions here, including later unreacts."
+    )
+    if not first_time:
+        return base
+    return (
+        f"{base} Authorize SyncBot in each Workspace where you want reactions to appear as you. "
+        "Custom emoji the other Workspace does not have will not appear as a native reaction there."
+    )
 
 
 def _reaction_style_for_edit(
     sync_channel: schemas.SyncChannel,
     body: dict | None = None,
     *,
-    direction: str | None = None,
+    subscribes: bool | None = None,
 ) -> str | None:
-    """Keep a saved type even when direction is send-only or off.
+    """Keep a saved type even when the channel does not subscribe.
 
-    New publish/subscribe still stores null when the channel does not receive.
-    Edit always shows the type radios, and turning reactions off should not
-    reset Hybrid (or Direct) to the new-channel default.
+    Edit always shows the type radios. Turning subscribe off should not
+    reset Hybrid, Direct, or Off to the new-channel default.
     """
-    from helpers.reactions import default_reaction_style_for_new_channel, direction_receives, reaction_style
+    from helpers.reaction import default_reaction_style_for_new_channel, reaction_style
 
     submitted = None
     if body is not None:
-        submitted = _valid_reaction_style(_get_selected_option_value(body, actions.CONFIG_PUBLISH_REACTION_STYLE))
+        for action in _REACTION_STYLE_ACTIONS:
+            submitted = _valid_reaction_style(_get_selected_option_value(body, action))
+            if submitted:
+                break
     if submitted:
         return submitted
     stored = _valid_reaction_style(getattr(sync_channel, "reaction_style", None))
@@ -115,8 +324,9 @@ def _reaction_style_for_edit(
     resolved = _valid_reaction_style(reaction_style(sync_channel))
     if resolved:
         return resolved
-    if direction and direction_receives(direction):
-        return default_reaction_style_for_new_channel(direction)
+    receives = helpers.channel_subscribes(sync_channel) if subscribes is None else subscribes
+    if receives:
+        return default_reaction_style_for_new_channel(subscribes=True)
     return None
 
 
@@ -151,22 +361,22 @@ def _channel_picker_block(label: str, action_id: str, *, team_id: str | None) ->
 def _channel_picker_help_text(*, team_id: str | None, subscribe: bool = False) -> str:
     """Explain what may be selected, including the private-channel warning when relevant."""
     if subscribe:
-        base = "Search for a Channel in your Workspace to receive the published Channel."
+        base = "Search for a Channel in your Workspace to join this Sync."
     else:
-        base = "Search for a Channel in your Workspace to publish."
+        base = "Search for a Channel in your Workspace to create a Sync."
     if helpers.allow_private_channels(team_id):
         if subscribe:
             return (
-                f"{base} :warning: Private Channels are currently allowed. Messages from the "
-                "published Channel will be copied into it, so anyone who can see your Channel "
+                f"{base} :warning: Private Channels are currently allowed. Messages from this Sync "
+                "will be copied into it, so anyone who can see your Channel "
                 "will be able to read them. If you pick a private Channel, SyncBot is added to it "
                 "for you, using your permission to invite it."
             )
         return (
-            f"{base} :warning: Private Channels are currently allowed. If you publish one, its "
-            "messages will be copied into the other Workspaces in this Group, where anyone who can "
-            "see the synced Channel will be able to read them. If you pick a private Channel, "
-            "SyncBot is added to it for you, using your permission to invite it."
+            f"{base} :warning: Private Channels are currently allowed. If you create a Sync on a "
+            "private Channel, its messages will be copied into the other Workspaces in this Group, "
+            "where anyone who can see the synced Channel will be able to read them. If you pick a "
+            "private Channel, SyncBot is added to it for you, using your permission to invite it."
         )
     return f"{base} Only public Channels can be synced."
 
@@ -192,15 +402,15 @@ def _validate_channel_selection(
     *,
     team_id: str | None = None,
     acting_user_id: str | None = None,
+    workspace_id: int | None = None,
+    source_sync_id: int | None = None,
 ) -> dict | None:
     """Validate a selected channel on submit, returning a Slack errors response or None.
 
     Three rules, all enforced here rather than only in the picker filter, which is
     advisory and bypassable:
 
-    * A channel already in an active sync is rejected. This is a **global** rule,
-      not per-group: ``get_sync_list`` resolves a channel to the first matching
-      sync, so a channel in two syncs has undefined send fan-out.
+    * A Workspace cannot subscribe to the same published source twice.
     * Private channels are rejected unless the ``allow_private_channels`` setting
       is on.
     * A private channel is also rejected when SyncBot has no user token it could
@@ -215,18 +425,30 @@ def _validate_channel_selection(
             "errors": {action_id: "Select a Channel."},
         }
 
-    existing = DbManager.find_records(
-        schemas.SyncChannel,
-        [
-            schemas.SyncChannel.channel_id == channel_id,
-            schemas.SyncChannel.deleted_at.is_(None),
-        ],
-    )
-    if existing:
-        return {
-            "response_action": "errors",
-            "errors": {action_id: "That Channel is already part of a Channel Sync. Pick a different Channel."},
-        }
+    if workspace_id and source_sync_id:
+        source_rows = DbManager.find_records(
+            schemas.SyncChannel,
+            [
+                schemas.SyncChannel.sync_id == int(source_sync_id),
+                schemas.SyncChannel.deleted_at.is_(None),
+            ],
+        )
+        for source in source_rows:
+            if not helpers.channel_publishes(source):
+                continue
+            if helpers.already_subscribed_to_source(
+                workspace_id=workspace_id,
+                source_workspace_id=source.workspace_id,
+                source_channel_id=source.channel_id,
+            ):
+                return {
+                    "response_action": "errors",
+                    "errors": {
+                        action_id: (
+                            "This Workspace already subscribes to that published Channel through another Channel Sync."
+                        )
+                    },
+                }
 
     if not helpers.allow_private_channels(team_id or ""):
         try:
@@ -259,67 +481,33 @@ def _validate_channel_selection(
     return None
 
 
-def _build_publish_step2(
-    sync_mode: str,
-    other_members: list,
-    *,
-    team_id: str | None,
-    reaction_direction: str,
-) -> orm.BlockView:
-    """Build the step-2 modal blocks: native channel picker + optional target workspace."""
-    from helpers.reactions import direction_receives
-
-    modal_blocks: list[orm.BaseBlock] = []
-
-    modal_blocks.append(
-        _channel_picker_block("Channel to Publish", actions.CONFIG_PUBLISH_CHANNEL_SELECT, team_id=team_id)
+def _build_create_sync_blocks(*, team_id: str | None, group_id: int | None) -> list[orm.BaseBlock]:
+    """One-screen Create Sync: group context, participation, picker, reaction type."""
+    blocks: list[orm.BaseBlock] = []
+    ctx = _relationship_context(group_id=group_id)
+    if ctx:
+        blocks.append(ctx)
+    blocks.extend(
+        [
+            _participation_block(mode="create"),
+            block_context(_participation_help(mode="create")),
+            _channel_picker_block("Channel", actions.CONFIG_CREATE_SYNC_SELECT, team_id=team_id),
+            block_context(_channel_picker_help_text(team_id=team_id)),
+            _reaction_style_block(actions.CONFIG_SYNC_REACTION_STYLE),
+            block_context(_reaction_style_help(first_time=True)),
+        ]
     )
-    modal_blocks.append(block_context(_channel_picker_help_text(team_id=team_id)))
-
-    if direction_receives(reaction_direction):
-        modal_blocks.append(_reaction_style_block(actions.CONFIG_PUBLISH_REACTION_STYLE))
-        modal_blocks.append(
-            block_context(
-                "Authorize SyncBot in each Workspace where you want reactions to appear as you. "
-                "Custom emoji the other Workspace does not have will not appear as a native reaction there."
-            )
-        )
-
-    if sync_mode == "direct" and other_members:
-        ws_options: list[orm.SelectorOption] = []
-        for other_member in other_members:
-            other_workspace = helpers.get_workspace_by_id(other_member.workspace_id)
-            name = (
-                helpers.resolve_workspace_name(other_workspace)
-                if other_workspace
-                else f"Workspace {other_member.workspace_id}"
-            )
-            ws_options.append(orm.SelectorOption(name=name, value=str(other_member.workspace_id)))
-
-        if ws_options:
-            modal_blocks.append(
-                orm.InputBlock(
-                    label="Target Workspace",
-                    action=actions.CONFIG_PUBLISH_DIRECT_TARGET,
-                    element=orm.StaticSelectElement(
-                        placeholder="Select target Workspace",
-                        options=ws_options,
-                    ),
-                    optional=False,
-                )
-            )
-
-    return orm.BlockView(blocks=modal_blocks)
+    return blocks
 
 
-def handle_publish_channel(
+def handle_create_sync(
     body: dict,
     client: WebClient,
     logger: Logger,
     context: dict,
 ) -> None:
-    """Open the publish-channel flow — always starts with step 1 (sync mode selection)."""
-    auth_result = _get_authorized_workspace(body, client, context, "publish_channel")
+    """Open the one-step Create Sync modal."""
+    auth_result = _get_authorized_workspace(body, client, context, "create_sync")
     if not auth_result:
         return
     _, workspace_record = auth_result
@@ -329,110 +517,28 @@ def handle_publish_channel(
     try:
         group_id = int(raw_group_id)
     except (TypeError, ValueError):
-        _logger.warning(f"publish_channel: invalid group_id: {raw_group_id!r}")
+        _logger.warning(f"create_sync: invalid group_id: {raw_group_id!r}")
         return
 
-    mode_options = [
-        orm.SelectorOption(
-            name="Available to All Workspaces\nAny current or future Workspace Group Member can subscribe.",
-            value="group",
-        ),
-        orm.SelectorOption(
-            name="Only with Specific Workspace\nChoose a specific Workspace Group Member to allow to subscribe.",
-            value="direct",
-        ),
-    ]
-    step1_blocks: list[orm.BaseBlock] = [
-        orm.InputBlock(
-            label="Who can subscribe",
-            action=actions.CONFIG_PUBLISH_SYNC_MODE,
-            element=orm.RadioButtonsElement(
-                initial_value="group",
-                options=orm.as_selector_options(
-                    [o.name for o in mode_options],
-                    [o.value for o in mode_options],
-                ),
-            ),
-            optional=False,
-        ),
-        _reaction_direction_block(actions.CONFIG_PUBLISH_REACTION_DIRECTION),
-        block_context(
-            "Reactions only show in a Workspace that chose to receive them. Custom emoji the other "
-            "Workspace does not have will not appear as a reaction there."
-        ),
-    ]
-    orm.BlockView(blocks=step1_blocks).post_modal(
+    orm.BlockView(blocks=_build_create_sync_blocks(team_id=workspace_record.team_id, group_id=group_id)).post_modal(
         client=client,
         trigger_id=trigger_id,
-        callback_id=actions.CONFIG_PUBLISH_MODE_SUBMIT,
-        title_text="Publish Channel",
-        submit_button_text="Next",
+        callback_id=actions.CONFIG_CREATE_SYNC_SUBMIT,
+        title_text="Create Sync",
+        submit_button_text="Create Sync",
         parent_metadata={"group_id": group_id, "workspace_id": workspace_record.id},
         new_or_add="new",
         body=body,
     )
 
 
-def handle_publish_mode_submit_ack(
+def handle_create_sync_submit_ack(
     body: dict,
     client: WebClient,
     context: dict,
 ) -> dict | None:
-    """Ack phase for step 1: read sync mode and return ``response_action=update`` for step 2."""
-    auth_result = _get_authorized_workspace(body, client, context, "publish_mode_submit")
-    if not auth_result:
-        return None
-    _, workspace_record = auth_result
-
-    metadata = _parse_private_metadata(body)
-    group_id = metadata.get("group_id")
-    if not group_id:
-        raw_pm = helpers.safe_get(body, "view", "private_metadata") or ""
-        _logger.warning(
-            "publish_mode_submit: missing group_id in metadata",
-            extra={
-                "team_id": _extract_team_id(body),
-                "workspace_id": metadata.get("workspace_id"),
-                "private_metadata_len": len(raw_pm) if isinstance(raw_pm, str) else None,
-            },
-        )
-        return None
-
-    sync_mode = _get_selected_option_value(body, actions.CONFIG_PUBLISH_SYNC_MODE) or "group"
-    reaction_direction = (
-        _get_selected_option_value(body, actions.CONFIG_PUBLISH_REACTION_DIRECTION) or constants.REACTION_DIRECTION_BOTH
-    )
-
-    group_members = _get_group_members(group_id)
-    other_members = [
-        member for member in group_members if member.workspace_id != workspace_record.id and member.workspace_id
-    ]
-    step2 = _build_publish_step2(
-        sync_mode,
-        other_members,
-        team_id=workspace_record.team_id,
-        reaction_direction=reaction_direction,
-    )
-    updated_view = step2.as_ack_update(
-        callback_id=actions.CONFIG_PUBLISH_CHANNEL_SUBMIT,
-        title_text="Publish Channel",
-        submit_button_text="Publish",
-        parent_metadata={
-            "group_id": group_id,
-            "sync_mode": sync_mode,
-            "reaction_direction": reaction_direction,
-        },
-    )
-    return {"response_action": "update", "view": updated_view}
-
-
-def handle_publish_channel_submit_ack(
-    body: dict,
-    client: WebClient,
-    context: dict,
-) -> dict | None:
-    """Ack phase for publish: validate and close modal (errors) or empty ack (success)."""
-    auth_result = _get_authorized_workspace(body, client, context, "publish_channel_submit")
+    """Ack phase for Create Sync: validate and close modal (errors) or empty ack (success)."""
+    auth_result = _get_authorized_workspace(body, client, context, "create_sync_submit")
     if not auth_result:
         return None
     _, workspace_record = auth_result
@@ -441,38 +547,28 @@ def handle_publish_channel_submit_ack(
     group_id = metadata.get("group_id")
 
     if not group_id:
-        _logger.warning("publish_channel_submit: missing group_id in metadata")
+        _logger.warning("create_sync_submit: missing group_id in metadata")
         return None
 
-    sync_mode = metadata.get("sync_mode", "group")
-    target_workspace_id = None
-    selected_target = _get_selected_option_value(body, actions.CONFIG_PUBLISH_DIRECT_TARGET)
-    if selected_target:
-        with contextlib.suppress(TypeError, ValueError):
-            target_workspace_id = int(selected_target)
-
-    if sync_mode == "direct" and not target_workspace_id:
-        sync_mode = "group"
-
-    channel_id = _get_selected_conversation_or_option(body, actions.CONFIG_PUBLISH_CHANNEL_SELECT)
+    channel_id, picker_action = _selected_channel(body, _CREATE_CHANNEL_ACTIONS)
 
     return _validate_channel_selection(
         client,
         channel_id,
-        actions.CONFIG_PUBLISH_CHANNEL_SELECT,
+        picker_action,
         team_id=_extract_team_id(body) or workspace_record.team_id,
         acting_user_id=helpers.safe_get(body, "user", "id"),
     )
 
 
-def handle_publish_channel_submit_work(
+def handle_create_sync_submit_work(
     body: dict,
     client: WebClient,
     logger: Logger,
     context: dict,
 ) -> None:
     """Lazy work phase: create Sync + SyncChannel after modal closed."""
-    auth_result = _get_authorized_workspace(body, client, context, "publish_channel_submit")
+    auth_result = _get_authorized_workspace(body, client, context, "create_sync_submit")
     if not auth_result:
         return
     user_id, workspace_record = auth_result
@@ -483,29 +579,16 @@ def handle_publish_channel_submit_work(
     if not group_id:
         return
 
-    sync_mode = metadata.get("sync_mode", "group")
-    reaction_direction, reaction_style = _parse_reaction_fields(
-        body,
-        metadata,
-        style_action=actions.CONFIG_PUBLISH_REACTION_STYLE,
-    )
-    target_workspace_id = None
-    selected_target = _get_selected_option_value(body, actions.CONFIG_PUBLISH_DIRECT_TARGET)
-    if selected_target:
-        with contextlib.suppress(TypeError, ValueError):
-            target_workspace_id = int(selected_target)
-
-    if sync_mode == "direct" and not target_workspace_id:
-        sync_mode = "group"
-
-    channel_id = _get_selected_conversation_or_option(body, actions.CONFIG_PUBLISH_CHANNEL_SELECT)
+    publishes, subscribes = _participation_from_body(body)
+    reaction_style = _parse_reaction_fields(body)
+    channel_id, picker_action = _selected_channel(body, _CREATE_CHANNEL_ACTIONS)
 
     # The ack phase already surfaced any error; this keeps the work phase from
     # writing on a payload it should reject.
     if _validate_channel_selection(
         client,
         channel_id,
-        actions.CONFIG_PUBLISH_CHANNEL_SELECT,
+        picker_action,
         team_id=_extract_team_id(body) or workspace_record.team_id,
         acting_user_id=helpers.safe_get(body, "user", "id") or user_id,
     ):
@@ -525,8 +608,8 @@ def handle_publish_channel_submit_work(
             title=_sanitize_text(channel_name),
             description=None,
             group_id=group_id,
-            sync_mode=sync_mode,
-            target_workspace_id=target_workspace_id if sync_mode == "direct" else None,
+            sync_mode="group",
+            target_workspace_id=None,
             publisher_workspace_id=workspace_record.id,
         )
         DbManager.create_record(sync_record)
@@ -536,13 +619,16 @@ def handle_publish_channel_submit_work(
             channel_id=channel_id,
             workspace_id=workspace_record.id,
             created_at=datetime.now(UTC),
-            reaction_direction=reaction_direction,
             reaction_style=reaction_style,
+            publishes=publishes,
+            subscribes=subscribes,
         )
         DbManager.create_record(sync_channel_record)
     except Exception as e:
-        _logger.error(f"Failed to publish channel {channel_id}: {e}")
+        _logger.error(f"Failed to create Sync for channel {channel_id}: {e}")
         return
+
+    helpers.invalidate_channel_memberships(channel_id)
 
     # Membership comes after the rows exist: Slack fires ``member_joined_channel``
     # as soon as the bot is added, and that handler leaves any channel with no
@@ -553,7 +639,7 @@ def handle_publish_channel_submit_work(
         team_id=team_id,
         acting_user_id=acting_user_id,
         rollback=lambda: helpers.purge_sync(sync_record.id),
-        log_event="publish_channel_membership_failed",
+        log_event="create_sync_membership_failed",
         log_extra={"workspace_id": workspace_record.id, "channel_id": channel_id, "sync_id": sync_record.id},
         context=context,
     ):
@@ -570,36 +656,22 @@ def handle_publish_channel_submit_work(
 
     admin_name, _admin_label = helpers.format_admin_label(client, acting_user_id, workspace_record)
     try:
-        if sync_mode == "direct" and target_workspace_id:
-            target_ws = helpers.get_workspace_by_id(target_workspace_id)
-            target_label = helpers.resolve_workspace_name(target_ws) if target_ws else "another Workspace"
-            notice = (
-                f"*{admin_name}* published this Channel to *{target_label}*. "
-                "Messages will be shared automatically with subscribers to this Channel."
-            )
-        else:
-            group_rows = DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.id == group_id])
-            group_name = group_rows[0].name if group_rows else "Workspace Group"
-            suffix = "" if "SyncBot Group" in group_name else " SyncBot Group"
-            notice = (
-                f"*{admin_name}* published this Channel to the *{group_name}*{suffix}. "
-                "Messages will be shared automatically with subscribers to this Channel."
-            )
-        client.chat_postMessage(channel=channel_id, text=notice)
+        client.chat_postMessage(channel=channel_id, text=_create_sync_notice(admin_name, publishes, subscribes))
     except Exception as exc:
         _logger.warning(
-            "publish_channel_announce_failed",
+            "create_sync_announce_failed",
             extra={"channel_id": channel_id, "sync_id": sync_record.id, "error": str(exc)},
         )
 
     _logger.info(
-        "channel_published",
+        "sync_created",
         extra={
             "workspace_id": workspace_record.id,
             "channel_id": channel_id,
             "group_id": group_id,
             "sync_id": sync_record.id,
-            "sync_mode": sync_mode,
+            "publishes": publishes,
+            "subscribes": subscribes,
         },
     )
 
@@ -607,95 +679,266 @@ def handle_publish_channel_submit_work(
     _refresh_group_member_homes(group_id, workspace_record.id, logger, context=context)
 
 
-def handle_unpublish_channel(
+def handle_leave_sync(
     body: dict,
     client: WebClient,
     logger: Logger,
     context: dict,
 ) -> None:
-    """Unpublish a channel: hard-delete the Sync and everything beneath it.
+    """Show a confirmation modal before leaving a channel sync."""
+    sync_id = _sync_id_from_action(body, (actions.CONFIG_LEAVE_SYNC,))
+    if not sync_id:
+        _logger.warning("leave_sync_invalid_id", extra={"action_id": helpers.safe_get(body, "actions", 0, "action_id")})
+        return
 
-    There are no DB cascades on ``sync_channels.sync_id`` or
-    ``post_meta.sync_channel_id``, so :func:`helpers.purge_sync` deletes the
-    children first. Deleting the ``Sync`` directly fails on MySQL with error
-    1451 and makes the button look dead.
+    trigger_id = helpers.safe_get(body, "trigger_id")
+    if not trigger_id:
+        return
 
-    Only the original publisher can unpublish.
-    """
-    auth_result = _get_authorized_workspace(body, client, context, "unpublish_channel")
+    confirm_blocks: list[orm.BaseBlock] = []
+    last_publisher = False
+    auth_result = _get_authorized_workspace(body, client, context, "leave_sync")
+    workspace_record = None
+    if auth_result:
+        _, workspace_record = auth_result
+        sync_record = DbManager.get_record(schemas.Sync, sync_id)
+        all_channels = DbManager.find_records(
+            schemas.SyncChannel,
+            [schemas.SyncChannel.sync_id == sync_id, schemas.SyncChannel.deleted_at.is_(None)],
+        )
+        my_channel = next((row for row in all_channels if row.workspace_id == workspace_record.id), None)
+        last_publisher = _is_last_publisher(all_channels, workspace_record.id)
+        ctx = _relationship_context(
+            group_id=getattr(sync_record, "group_id", None) if sync_record else None,
+            local_channel_id=my_channel.channel_id if my_channel else None,
+            local_workspace=workspace_record,
+        )
+        if ctx:
+            confirm_blocks.append(ctx)
+
+    if last_publisher:
+        confirm_blocks.append(
+            section(
+                ":warning: *You are the last publisher in this Sync.*\n\n"
+                "Leaving will:\n"
+                "\u2022 End this Sync for every Workspace\n"
+                "\u2022 Delete Sync history for every participating Channel\n\n"
+                "Anyone in the Group can Create Sync later. "
+                "_No messages will be deleted from Slack — only SyncBot's tracking history is removed._"
+            )
+        )
+    else:
+        confirm_blocks.append(
+            section(
+                ":warning: *Are you sure you want to leave this Sync?*\n\n"
+                "This will:\n"
+                "\u2022 Remove your Workspace's Sync history for this Channel\n"
+                "\u2022 Remove this Channel from the Sync\n"
+                "\u2022 Other Workspaces in the Sync will continue uninterrupted\n\n"
+                "_No messages will be deleted from any Channel — only SyncBot's tracking history for your Workspace is removed._"
+            )
+        )
+    confirm_form = orm.BlockView(
+        blocks=confirm_blocks
+        + [
+            orm.ActionsBlock(
+                elements=[
+                    orm.ButtonElement(
+                        label=":octagonal_sign: Leave Sync",
+                        action=actions.CONFIG_LEAVE_SYNC_CONFIRM,
+                        value=str(sync_id),
+                        style="danger",
+                    ),
+                ]
+            ),
+        ]
+    )
+
+    confirm_form.post_modal(
+        client=client,
+        trigger_id=trigger_id,
+        callback_id=actions.CONFIG_LEAVE_SYNC_CONFIRM,
+        title_text="Leave Sync",
+        submit_button_text=None,
+        close_button_text="Cancel",
+        parent_metadata={"sync_id": sync_id, "last_publisher": last_publisher},
+        body=body,
+    )
+
+
+def handle_leave_sync_confirm(
+    body: dict,
+    client: WebClient,
+    logger: Logger,
+    context: dict,
+) -> None:
+    """Remove this workspace from the sync; purge everyone if the last publisher leaves."""
+    auth_result = _get_authorized_workspace(body, client, context, "leave_sync_confirm")
     if not auth_result:
         return
     user_id, workspace_record = auth_result
 
-    admin_name, admin_label = helpers.format_admin_label(client, user_id, workspace_record)
-
-    raw_value = helpers.safe_get(body, "actions", 0, "value")
-    try:
-        sync_id = int(raw_value)
-    except (TypeError, ValueError):
-        _logger.warning(f"Invalid sync_id for unpublish: {raw_value!r}")
+    meta = _parse_private_metadata(body)
+    sync_id = meta.get("sync_id")
+    if not sync_id:
+        _logger.warning("leave_sync_confirm: missing sync_id in metadata")
         return
 
     sync_record = DbManager.get_record(schemas.Sync, id=sync_id)
-    if not sync_record:
-        return
-
-    if workspace_record and sync_record.publisher_workspace_id != workspace_record.id:
-        _logger.warning("unpublish_denied: not the publisher")
-        return
-
-    group_id = sync_record.group_id
+    admin_name, admin_label = helpers.format_admin_label(client, user_id, workspace_record)
 
     all_channels = DbManager.find_records(
         schemas.SyncChannel,
         [schemas.SyncChannel.sync_id == sync_id, schemas.SyncChannel.deleted_at.is_(None)],
     )
+    my_channel = next((c for c in all_channels if c.workspace_id == workspace_record.id), None)
+    other_channels = [c for c in all_channels if c.workspace_id != workspace_record.id]
+    last_publisher = _is_last_publisher(all_channels, workspace_record.id)
+    end_sync = last_publisher or not other_channels
 
     for sync_channel in all_channels:
         try:
-            member_ws = helpers.get_workspace_by_id(sync_channel.workspace_id)
-            if member_ws and member_ws.bot_token:
-                name = (
-                    admin_name if workspace_record and sync_channel.workspace_id == workspace_record.id else admin_label
-                )
-                member_client = WebClient(token=helpers.decrypt_bot_token(member_ws.bot_token))
-                helpers.notify_synced_channels(
-                    member_client,
-                    [sync_channel.channel_id],
-                    f":octagonal_sign: *{name}* unpublished this Channel. Syncing is no longer available.",
-                )
-                member_client.conversations_leave(channel=sync_channel.channel_id)
+            channel_ws = helpers.get_workspace_by_id(sync_channel.workspace_id)
+            if not channel_ws or not channel_ws.bot_token:
+                continue
+            name = admin_name if sync_channel.workspace_id == workspace_record.id else admin_label
+            if end_sync:
+                msg = f":octagonal_sign: *{name}* left this Sync. The Sync has ended."
+            else:
+                msg = f":octagonal_sign: *{name}* left this Sync."
+            ws_client = WebClient(token=helpers.decrypt_bot_token(channel_ws.bot_token))
+            helpers.notify_synced_channels(ws_client, [sync_channel.channel_id], msg)
         except Exception as e:
-            _logger.warning(f"Failed to notify/leave channel {sync_channel.channel_id}: {e}")
+            _logger.warning(f"Failed to notify channel {sync_channel.channel_id}: {e}")
 
-    try:
-        helpers.purge_sync(sync_id)
-    except Exception as exc:
-        # Previously any failure here was indistinguishable from a dead button.
-        _logger.error(
-            "unpublish_failed",
-            extra={"sync_id": sync_id, "group_id": group_id, "error": str(exc)},
-        )
-        with contextlib.suppress(Exception):
-            helpers.notify_admins_dm(
-                client,
-                helpers.format_error_dm(
-                    ":warning: Unpublishing that Channel failed, so it is still published. "
-                    "Please try again, and let your SyncBot operator know if it keeps failing.",
-                    {"error": str(exc), "event": "unpublish_failed", "sync": sync_id},
-                ),
-                team_id=workspace_record.team_id if workspace_record else None,
+    group_id = sync_record.group_id if sync_record else None
+    if last_publisher:
+        for sync_channel in all_channels:
+            try:
+                member_ws = helpers.get_workspace_by_id(sync_channel.workspace_id)
+                if member_ws and member_ws.bot_token:
+                    member_client = WebClient(token=helpers.decrypt_bot_token(member_ws.bot_token))
+                    member_client.conversations_leave(channel=sync_channel.channel_id)
+            except Exception as e:
+                _logger.warning(f"Failed to leave channel {sync_channel.channel_id}: {e}")
+        try:
+            helpers.purge_sync(sync_id)
+        except Exception as exc:
+            _logger.error(
+                "leave_sync_failed",
+                extra={"sync_id": sync_id, "group_id": group_id, "error": str(exc)},
             )
-        return
+            with contextlib.suppress(Exception):
+                helpers.notify_admins_dm(
+                    client,
+                    helpers.format_error_dm(
+                        ":warning: Leaving that Sync failed, so it is still active. "
+                        "Please try again, and let your SyncBot operator know if it keeps failing.",
+                        {"error": str(exc), "event": "leave_sync_failed", "sync": sync_id},
+                    ),
+                    team_id=workspace_record.team_id if workspace_record else None,
+                )
+            return
+    else:
+        if my_channel:
+            helpers.purge_sync_channels([my_channel])
+            try:
+                client.conversations_leave(channel=my_channel.channel_id)
+            except Exception as e:
+                _logger.warning(f"Failed to leave channel {my_channel.channel_id}: {e}")
+        if not other_channels:
+            helpers.purge_sync(sync_id)
 
     _logger.info(
-        "channel_unpublished",
-        extra={"sync_id": sync_id, "group_id": group_id},
+        "sync_left",
+        extra={
+            "sync_id": sync_id,
+            "workspace_id": workspace_record.id,
+            "channel_id": my_channel.channel_id if my_channel else None,
+            "ended": end_sync,
+        },
     )
 
     builders.refresh_home_tab_for_workspace(workspace_record, logger, context=context, user_id=user_id)
     if group_id:
-        _refresh_group_member_homes(group_id, workspace_record.id if workspace_record else 0, logger, context=context)
+        _refresh_group_member_homes(group_id, workspace_record.id, logger, context=context)
+    _close_modal_done(client, body, ":octagonal_sign: You left the Sync. You can close this now.")
+
+
+def _open_pause_resume_confirm(
+    body: dict,
+    client: WebClient,
+    logger: Logger,
+    context: dict,
+    *,
+    prefixes: tuple[str, ...],
+    confirm_action: str,
+    title: str,
+    button_label: str,
+    warning: str,
+    log_event: str,
+) -> None:
+    sync_id = _sync_id_from_action(body, prefixes)
+    if not sync_id:
+        _logger.warning(
+            f"{log_event}_invalid_id", extra={"action_id": helpers.safe_get(body, "actions", 0, "action_id")}
+        )
+        return
+    trigger_id = helpers.safe_get(body, "trigger_id")
+    if not trigger_id:
+        return
+
+    confirm_blocks: list[orm.BaseBlock] = []
+    auth_result = _get_authorized_workspace(body, client, context, log_event)
+    if auth_result:
+        _, workspace_record = auth_result
+        sync_record = DbManager.get_record(schemas.Sync, sync_id)
+        my_channel = next(
+            (
+                row
+                for row in DbManager.find_records(
+                    schemas.SyncChannel,
+                    [
+                        schemas.SyncChannel.sync_id == sync_id,
+                        schemas.SyncChannel.workspace_id == workspace_record.id,
+                        schemas.SyncChannel.deleted_at.is_(None),
+                    ],
+                )
+            ),
+            None,
+        )
+        ctx = _relationship_context(
+            group_id=getattr(sync_record, "group_id", None) if sync_record else None,
+            local_channel_id=my_channel.channel_id if my_channel else None,
+            local_workspace=workspace_record,
+        )
+        if ctx:
+            confirm_blocks.append(ctx)
+    confirm_blocks.append(section(warning))
+    confirm_form = orm.BlockView(
+        blocks=confirm_blocks
+        + [
+            orm.ActionsBlock(
+                elements=[
+                    orm.ButtonElement(
+                        label=button_label,
+                        action=confirm_action,
+                        value=str(sync_id),
+                    ),
+                ]
+            ),
+        ]
+    )
+    confirm_form.post_modal(
+        client=client,
+        trigger_id=trigger_id,
+        callback_id=confirm_action,
+        title_text=title,
+        submit_button_text=None,
+        close_button_text="Cancel",
+        parent_metadata={"sync_id": sync_id},
+        body=body,
+    )
 
 
 def _toggle_sync_status(
@@ -704,27 +947,26 @@ def _toggle_sync_status(
     logger: Logger,
     context: dict,
     *,
-    action_prefix: str,
     target_status: str,
     emoji: str,
     verb: str,
     log_event: str,
+    done_message: str,
 ) -> None:
-    """Shared logic for pausing or resuming a channel sync. Only the current workspace's channel is toggled."""
-    action_id = helpers.safe_get(body, "actions", 0, "action_id") or ""
-    sync_id_str = action_id.replace(action_prefix + "_", "")
-
-    try:
-        sync_id = int(sync_id_str)
-    except (TypeError, ValueError):
-        _logger.warning(f"{log_event}_invalid_id", extra={"action_id": action_id})
+    """Pause or resume this workspace's channel only."""
+    meta = _parse_private_metadata(body)
+    sync_id = meta.get("sync_id")
+    if not sync_id:
+        sync_id = _sync_id_from_action(body, (actions.CONFIG_PAUSE_SYNC, actions.CONFIG_RESUME_SYNC))
+    if not sync_id:
+        _logger.warning(f"{log_event}_invalid_id")
         return
 
     auth_result = _get_authorized_workspace(body, client, context, log_event)
     if not auth_result:
         return
     user_id, workspace_record = auth_result
-    admin_name, admin_label = helpers.format_admin_label(client, user_id, workspace_record)
+    admin_name, _admin_label = helpers.format_admin_label(client, user_id, workspace_record)
 
     all_channels = DbManager.find_records(
         schemas.SyncChannel,
@@ -745,54 +987,32 @@ def _toggle_sync_status(
         [schemas.SyncChannel.id == my_sync_channel.id],
         {schemas.SyncChannel.status: target_status},
     )
-    helpers._cache_delete(f"sync_list:{my_sync_channel.channel_id}")
+    helpers.invalidate_channel_memberships(my_sync_channel.channel_id)
 
-    ws_cache: dict[int, schemas.Workspace | None] = {}
-    for sync_channel in [my_sync_channel]:
-        try:
-            channel_ws = ws_cache.get(sync_channel.workspace_id) or helpers.get_workspace_by_id(
-                sync_channel.workspace_id
-            )
-            ws_cache[sync_channel.workspace_id] = channel_ws
-            if channel_ws and channel_ws.bot_token:
-                ws_client = WebClient(token=helpers.decrypt_bot_token(channel_ws.bot_token))
-                if target_status == "active":
-                    # Resume re-adds the bot if it was removed while paused. The
-                    # row already exists, so nothing to roll back — a private
-                    # channel simply needs the invite path instead of join.
-                    try:
-                        # Resume only touches this workspace's channel, so Bolt's
-                        # request-scoped bot_user_id is the right invitee. Do not
-                        # pass context if that ever changes — another workspace's
-                        # bot member ID is ``user_not_found`` here.
-                        helpers.ensure_bot_in_conversation(
-                            ws_client,
-                            sync_channel.channel_id,
-                            team_id=channel_ws.team_id,
-                            acting_user_id=user_id,
-                            context=context if channel_ws.id == workspace_record.id else None,
-                        )
-                    except Exception as exc:
-                        _logger.warning(
-                            "resume_sync_membership_failed",
-                            extra={"channel_id": sync_channel.channel_id, "error": str(exc)},
-                        )
-                name = (
-                    admin_name if workspace_record and sync_channel.workspace_id == workspace_record.id else admin_label
-                )
-                other_channels = [c for c in all_channels if c.workspace_id != sync_channel.workspace_id]
-                if other_channels:
-                    other_ws = ws_cache.get(other_channels[0].workspace_id) or helpers.get_workspace_by_id(
-                        other_channels[0].workspace_id
+    try:
+        if workspace_record.bot_token:
+            ws_client = WebClient(token=helpers.decrypt_bot_token(workspace_record.bot_token))
+            if target_status == "active":
+                try:
+                    helpers.ensure_bot_in_conversation(
+                        ws_client,
+                        my_sync_channel.channel_id,
+                        team_id=workspace_record.team_id,
+                        acting_user_id=user_id,
+                        context=context,
                     )
-                    ws_cache[other_channels[0].workspace_id] = other_ws
-                    channel_ref = helpers.resolve_channel_name(other_channels[0].channel_id, other_ws)
-                    msg = f":{emoji}: *{name}* {verb} syncing with *{channel_ref}*."
-                else:
-                    msg = f":{emoji}: *{name}* {verb} channel syncing."
-                helpers.notify_synced_channels(ws_client, [sync_channel.channel_id], msg)
-        except Exception as e:
-            _logger.warning(f"Failed to notify channel {sync_channel.channel_id} about {verb}: {e}")
+                except Exception as exc:
+                    _logger.warning(
+                        "resume_sync_membership_failed",
+                        extra={"channel_id": my_sync_channel.channel_id, "error": str(exc)},
+                    )
+            helpers.notify_synced_channels(
+                ws_client,
+                [my_sync_channel.channel_id],
+                f":{emoji}: *{admin_name}* {verb} this Sync.",
+            )
+    except Exception as e:
+        _logger.warning(f"Failed to notify channel {my_sync_channel.channel_id} about {verb}: {e}")
 
     _logger.info(log_event, extra={"sync_id": sync_id, "sync_channel_id": my_sync_channel.id})
 
@@ -802,320 +1022,170 @@ def _toggle_sync_status(
         _refresh_group_member_homes(
             sync_record.group_id, workspace_record.id if workspace_record else 0, logger, context=context
         )
+    _close_modal_done(client, body, done_message)
 
 
 def handle_pause_sync(body: dict, client: WebClient, logger: Logger, context: dict) -> None:
+    """Show a confirmation modal before pausing."""
+    _open_pause_resume_confirm(
+        body,
+        client,
+        logger,
+        context,
+        prefixes=(actions.CONFIG_PAUSE_SYNC,),
+        confirm_action=actions.CONFIG_PAUSE_SYNC_CONFIRM,
+        title="Pause Sync",
+        button_label=":double_vertical_bar: Pause Sync",
+        warning=":double_vertical_bar: *Pause this Sync?*\n\nMessages, threads, and reactions will not sync until you Resume Sync.",
+        log_event="pause_sync",
+    )
+
+
+def handle_pause_sync_confirm(body: dict, client: WebClient, logger: Logger, context: dict) -> None:
     """Pause an active channel sync."""
     _toggle_sync_status(
         body,
         client,
         logger,
         context,
-        action_prefix=actions.CONFIG_PAUSE_SYNC,
         target_status="paused",
         emoji="double_vertical_bar",
         verb="paused",
         log_event="sync_paused",
+        done_message=":double_vertical_bar: Sync paused. You can close this now.",
     )
 
 
 def handle_resume_sync(body: dict, client: WebClient, logger: Logger, context: dict) -> None:
+    """Show a confirmation modal before resuming."""
+    _open_pause_resume_confirm(
+        body,
+        client,
+        logger,
+        context,
+        prefixes=(actions.CONFIG_RESUME_SYNC,),
+        confirm_action=actions.CONFIG_RESUME_SYNC_CONFIRM,
+        title="Resume Sync",
+        button_label=":arrow_forward: Resume Sync",
+        warning=":arrow_forward: *Resume this Sync?*\n\nMessages, threads, and reactions will start syncing again.",
+        log_event="resume_sync",
+    )
+
+
+def handle_resume_sync_confirm(body: dict, client: WebClient, logger: Logger, context: dict) -> None:
     """Resume a paused channel sync."""
     _toggle_sync_status(
         body,
         client,
         logger,
         context,
-        action_prefix=actions.CONFIG_RESUME_SYNC,
         target_status="active",
         emoji="arrow_forward",
         verb="resumed",
         log_event="sync_resumed",
+        done_message=":arrow_forward: Sync resumed. You can close this now.",
     )
 
 
-def handle_stop_sync(
+def handle_join_sync(
     body: dict,
     client: WebClient,
     logger: Logger,
     context: dict,
 ) -> None:
-    """Show a confirmation modal before stopping a channel sync."""
-    action_id = helpers.safe_get(body, "actions", 0, "action_id") or ""
-    sync_id_str = action_id.replace(actions.CONFIG_STOP_SYNC + "_", "")
-
-    try:
-        sync_id = int(sync_id_str)
-    except (TypeError, ValueError):
-        _logger.warning("stop_sync_invalid_id", extra={"action_id": action_id})
-        return
-
-    trigger_id = helpers.safe_get(body, "trigger_id")
-    if not trigger_id:
-        return
-
-    confirm_form = orm.BlockView(
-        blocks=[
-            section(
-                ":warning: *Are you sure you want to stop syncing this Channel?*\n\n"
-                "This will:\n"
-                "\u2022 Remove your Workspace's Sync history for this Channel\n"
-                "\u2022 Remove this Channel from the active Sync\n"
-                "\u2022 Other Workspaces in the Sync will continue uninterrupted\n\n"
-                "_No messages will be deleted from any Channel — only SyncBot's tracking history for your Workspace is removed._"
-            ),
-            orm.ActionsBlock(
-                elements=[
-                    orm.ButtonElement(
-                        label="Stop Syncing",
-                        action=actions.CONFIG_STOP_SYNC_CONFIRM,
-                        value=str(sync_id),
-                        style="danger",
-                    ),
-                ]
-            ),
-        ]
-    )
-
-    confirm_form.post_modal(
-        client=client,
-        trigger_id=trigger_id,
-        callback_id=actions.CONFIG_STOP_SYNC_CONFIRM,
-        title_text="Stop Syncing",
-        submit_button_text=None,
-        close_button_text="Cancel",
-        parent_metadata={"sync_id": sync_id},
-        body=body,
-    )
-
-
-def handle_stop_sync_confirm(
-    body: dict,
-    client: WebClient,
-    logger: Logger,
-    context: dict,
-) -> None:
-    """Execute channel sync stop after confirmation.
-
-    Removes only this workspace's ``SyncChannel`` and its ``PostMeta``.
-    Other workspaces' data and the Sync record remain intact.
-    """
-    auth_result = _get_authorized_workspace(body, client, context, "stop_sync_confirm")
+    """Open the one-step Join Sync modal."""
+    auth_result = _get_authorized_workspace(body, client, context, "join_sync")
     if not auth_result:
         return
-    user_id, workspace_record = auth_result
-
-    meta = _parse_private_metadata(body)
-    sync_id = meta.get("sync_id")
-    if not sync_id:
-        _logger.warning("stop_sync_confirm: missing sync_id in metadata")
-        return
-
-    sync_record = DbManager.get_record(schemas.Sync, id=sync_id)
-    if sync_record and sync_record.publisher_workspace_id == workspace_record.id:
-        # The publisher is the channel's source: they tear a sync down with
-        # Unpublish, which removes it for everyone. Stopping here would delete
-        # only the publisher's own channel and strand the sync with a publisher
-        # that no longer has one. The Home tab routes the publisher to Unpublish;
-        # this guards forged or stale payloads.
-        _logger.warning(
-            "stop_sync_denied_publisher",
-            extra={"sync_id": sync_id, "workspace_id": workspace_record.id},
-        )
-        return
-
-    admin_name, admin_label = helpers.format_admin_label(client, user_id, workspace_record)
-
-    all_channels = DbManager.find_records(
-        schemas.SyncChannel,
-        [schemas.SyncChannel.sync_id == sync_id, schemas.SyncChannel.deleted_at.is_(None)],
-    )
-
-    my_channel = next((c for c in all_channels if c.workspace_id == workspace_record.id), None)
-    other_channels = [c for c in all_channels if c.workspace_id != workspace_record.id]
-
-    for sync_channel in all_channels:
-        try:
-            channel_ws = helpers.get_workspace_by_id(sync_channel.workspace_id)
-            if channel_ws and channel_ws.bot_token:
-                if sync_channel.workspace_id == workspace_record.id and other_channels:
-                    other_ws = helpers.get_workspace_by_id(other_channels[0].workspace_id)
-                    channel_ref = helpers.resolve_channel_name(other_channels[0].channel_id, other_ws)
-                    msg = f":octagonal_sign: *{admin_name}* stopped syncing with *{channel_ref}*."
-                elif sync_channel.workspace_id != workspace_record.id:
-                    my_ref = (
-                        helpers.resolve_channel_name(my_channel.channel_id, workspace_record)
-                        if my_channel
-                        else "the other Workspace"
-                    )
-                    msg = f":octagonal_sign: *{admin_label}* stopped syncing with *{my_ref}*."
-                else:
-                    msg = f":octagonal_sign: *{admin_name}* stopped Channel Syncing."
-                ws_client = WebClient(token=helpers.decrypt_bot_token(channel_ws.bot_token))
-                helpers.notify_synced_channels(ws_client, [sync_channel.channel_id], msg)
-        except Exception as e:
-            _logger.warning(f"Failed to notify channel {sync_channel.channel_id}: {e}")
-
-    if my_channel:
-        helpers.purge_sync_channels([my_channel])
-        try:
-            client.conversations_leave(channel=my_channel.channel_id)
-        except Exception as e:
-            _logger.warning(f"Failed to leave channel {my_channel.channel_id}: {e}")
-
-    if not other_channels:
-        # That was the last channel, so the sync is now an empty shell — e.g. a
-        # member stranded after the publisher left. Remove it so it stops showing
-        # up as "waiting"/"available" forever.
-        helpers.purge_sync(sync_id)
-
-    _logger.info(
-        "sync_stopped",
-        extra={
-            "sync_id": sync_id,
-            "workspace_id": workspace_record.id,
-            "channel_id": my_channel.channel_id if my_channel else None,
-        },
-    )
-
-    builders.refresh_home_tab_for_workspace(workspace_record, logger, context=context, user_id=user_id)
-    if sync_record and sync_record.group_id:
-        _refresh_group_member_homes(sync_record.group_id, workspace_record.id, logger, context=context)
-    _close_modal_done(client, body, ":octagonal_sign: Channel sync stopped. You can close this now.")
-
-
-def handle_subscribe_channel(
-    body: dict,
-    client: WebClient,
-    logger: Logger,
-    context: dict,
-) -> None:
-    """Open subscribe step 1: published-channel context and reaction direction."""
-    if not _get_authorized_workspace(body, client, context, "subscribe_channel"):
-        return
+    _, workspace_record = auth_result
 
     trigger_id = helpers.safe_get(body, "trigger_id")
     sync_id = helpers.safe_get(body, "actions", 0, "value")
+    if not sync_id:
+        _logger.warning("join_sync: missing sync_id")
+        return
+
+    sync_record = DbManager.get_record(schemas.Sync, int(sync_id))
+    pub_ch = _publisher_sync_channel(int(sync_id))
+    pub_ws = helpers.get_workspace_by_id(pub_ch.workspace_id) if pub_ch else None
 
     blocks: list[orm.BaseBlock] = []
-
-    if sync_id:
-        publisher_channels = DbManager.find_records(
-            schemas.SyncChannel,
-            [schemas.SyncChannel.sync_id == int(sync_id), schemas.SyncChannel.deleted_at.is_(None)],
-        )
-        if publisher_channels:
-            pub_ch = publisher_channels[0]
-            pub_ws = helpers.get_workspace_by_id(pub_ch.workspace_id)
-            ch_ref = _format_channel_ref(pub_ch.channel_id, pub_ws, is_local=False)
-            blocks.append(section(f"Published Channel: {ch_ref}"))
-
+    ctx = _relationship_context(
+        group_id=getattr(sync_record, "group_id", None) if sync_record else None,
+        published_channel=pub_ch,
+        published_workspace=pub_ws,
+    )
+    if ctx:
+        blocks.append(ctx)
     blocks.extend(
         [
-            _reaction_direction_block(actions.CONFIG_SUBSCRIBE_REACTION_DIRECTION),
-            block_context(
-                "Reactions only show in a Workspace that chose to receive them. Pick how this "
-                "Workspace participates before choosing your local Channel."
+            _participation_block(mode="join"),
+            block_context(_participation_help(mode="join")),
+            _channel_picker_block(
+                "Channel",
+                actions.CONFIG_JOIN_SYNC_SELECT,
+                team_id=workspace_record.team_id,
             ),
+            block_context(_channel_picker_help_text(team_id=workspace_record.team_id, subscribe=True)),
+            _reaction_style_block(actions.CONFIG_SYNC_REACTION_STYLE),
+            block_context(_reaction_style_help(first_time=True)),
         ]
     )
 
     orm.BlockView(blocks=blocks).post_modal(
         client=client,
         trigger_id=trigger_id,
-        callback_id=actions.CONFIG_SUBSCRIBE_DIRECTION_SUBMIT,
-        title_text="Subscribe",
-        submit_button_text="Next",
-        parent_metadata={"sync_id": int(sync_id)} if sync_id else None,
+        callback_id=actions.CONFIG_JOIN_SYNC_SUBMIT,
+        title_text="Join Sync",
+        submit_button_text="Join Sync",
+        parent_metadata={"sync_id": int(sync_id)},
         new_or_add="new",
         body=body,
     )
 
 
-def handle_subscribe_direction_submit_ack(
+def handle_join_sync_submit_ack(
     body: dict,
     client: WebClient,
     context: dict,
 ) -> dict | None:
-    """Ack phase for subscribe step 1: channel picker (+ type when receiving)."""
-    auth_result = _get_authorized_workspace(body, client, context, "subscribe_direction_submit")
-    if not auth_result:
-        return None
-    _, workspace_record = auth_result
-
-    metadata = _parse_private_metadata(body)
-    sync_id = metadata.get("sync_id")
-    if not sync_id:
-        _logger.warning("subscribe_direction_submit: missing sync_id")
-        return None
-
-    reaction_direction = (
-        _get_selected_option_value(body, actions.CONFIG_SUBSCRIBE_REACTION_DIRECTION)
-        or constants.REACTION_DIRECTION_BOTH
-    )
-    from helpers.reactions import direction_receives
-
-    modal_blocks: list[orm.BaseBlock] = [
-        _channel_picker_block(
-            "Channel to Subscribe",
-            actions.CONFIG_SUBSCRIBE_CHANNEL_SELECT,
-            team_id=workspace_record.team_id,
-        ),
-        block_context(_channel_picker_help_text(team_id=workspace_record.team_id, subscribe=True)),
-    ]
-    if direction_receives(reaction_direction):
-        modal_blocks.append(_reaction_style_block(actions.CONFIG_SUBSCRIBE_REACTION_STYLE))
-
-    step2 = orm.BlockView(blocks=modal_blocks)
-    updated_view = step2.as_ack_update(
-        callback_id=actions.CONFIG_SUBSCRIBE_CHANNEL_SUBMIT,
-        title_text="Subscribe",
-        submit_button_text="Subscribe",
-        parent_metadata={"sync_id": sync_id, "reaction_direction": reaction_direction},
-    )
-    return {"response_action": "update", "view": updated_view}
-
-
-def handle_subscribe_channel_submit_ack(
-    body: dict,
-    client: WebClient,
-    context: dict,
-) -> dict | None:
-    """Ack phase for subscribe: surface a visible error, or ack empty on success.
+    """Ack phase for Join Sync: surface a visible error, or ack empty on success.
 
     The native picker cannot pre-exclude ineligible channels, so an invalid
     choice has to be reported here rather than returning silently and leaving the
     user with a modal that appeared to work.
     """
-    auth_result = _get_authorized_workspace(body, client, context, "subscribe_channel_submit")
+    auth_result = _get_authorized_workspace(body, client, context, "join_sync_submit")
     if not auth_result:
         return None
     user_id, workspace_record = auth_result
 
     metadata = _parse_private_metadata(body)
     if not metadata.get("sync_id"):
-        _logger.warning("subscribe_channel_submit: missing sync_id")
+        _logger.warning("join_sync_submit: missing sync_id")
         return None
 
-    channel_id = _get_selected_conversation_or_option(body, actions.CONFIG_SUBSCRIBE_CHANNEL_SELECT)
+    channel_id, picker_action = _selected_channel(body, _JOIN_CHANNEL_ACTIONS)
 
     return _validate_channel_selection(
         client,
         channel_id,
-        actions.CONFIG_SUBSCRIBE_CHANNEL_SELECT,
+        picker_action,
         team_id=_extract_team_id(body) or workspace_record.team_id,
         acting_user_id=helpers.safe_get(body, "user", "id") or user_id,
+        workspace_id=workspace_record.id,
+        source_sync_id=int(metadata["sync_id"]),
     )
 
 
-def handle_subscribe_channel_submit(
+def handle_join_sync_submit(
     body: dict,
     client: WebClient,
     logger: Logger,
     context: dict,
 ) -> None:
-    """Subscribe to an available channel sync: create SyncChannel for subscriber."""
-    auth_result = _get_authorized_workspace(body, client, context, "subscribe_channel_submit")
+    """Join an available channel sync: create SyncChannel for this workspace."""
+    auth_result = _get_authorized_workspace(body, client, context, "join_sync_submit")
     if not auth_result:
         return
     user_id, workspace_record = auth_result
@@ -1124,19 +1194,21 @@ def handle_subscribe_channel_submit(
     sync_id = metadata.get("sync_id")
 
     if not sync_id:
-        _logger.warning("subscribe_channel_submit: missing sync_id")
+        _logger.warning("join_sync_submit: missing sync_id")
         return
 
-    channel_id = _get_selected_conversation_or_option(body, actions.CONFIG_SUBSCRIBE_CHANNEL_SELECT)
+    channel_id, picker_action = _selected_channel(body, _JOIN_CHANNEL_ACTIONS)
 
     # The ack phase already surfaced any error; this keeps the work phase from
     # writing on a payload it should reject.
     if _validate_channel_selection(
         client,
         channel_id,
-        actions.CONFIG_SUBSCRIBE_CHANNEL_SELECT,
+        picker_action,
         team_id=_extract_team_id(body) or workspace_record.team_id,
         acting_user_id=helpers.safe_get(body, "user", "id") or user_id,
+        workspace_id=workspace_record.id,
+        source_sync_id=int(sync_id),
     ):
         return
 
@@ -1158,7 +1230,7 @@ def handle_subscribe_channel_submit(
     )
     if existing_sub:
         _logger.info(
-            "subscribe_channel_duplicate_skip",
+            "join_sync_duplicate_skip",
             extra={
                 "sync_id": sync_id,
                 "channel_id": channel_id,
@@ -1171,15 +1243,13 @@ def handle_subscribe_channel_submit(
         return
 
     acting_user_id = helpers.safe_get(body, "user", "id") or user_id
-    admin_name, admin_label = helpers.format_admin_label(client, acting_user_id, workspace_record)
+    admin_label = _admin_workspace_label(client, acting_user_id, workspace_record)
+    admin_name, _ = helpers.format_admin_label(client, acting_user_id, workspace_record)
 
     team_id = _extract_team_id(body) or workspace_record.team_id
 
-    reaction_direction, reaction_style = _parse_reaction_fields(
-        body,
-        metadata,
-        style_action=actions.CONFIG_SUBSCRIBE_REACTION_STYLE,
-    )
+    reaction_style = _parse_reaction_fields(body)
+    publishes, subscribes = _participation_from_body(body)
 
     try:
         sync_channel_record = schemas.SyncChannel(
@@ -1187,13 +1257,16 @@ def handle_subscribe_channel_submit(
             channel_id=channel_id,
             workspace_id=workspace_record.id,
             created_at=datetime.now(UTC),
-            reaction_direction=reaction_direction,
             reaction_style=reaction_style,
+            publishes=publishes,
+            subscribes=subscribes,
         )
         DbManager.create_record(sync_channel_record)
     except Exception as e:
-        _logger.error(f"Failed to subscribe to channel sync {sync_id}: {e}")
+        _logger.error(f"Failed to join channel sync {sync_id}: {e}")
         return
+
+    helpers.invalidate_channel_memberships(channel_id)
 
     # Same ordering as publish: the row has to exist before Slack announces the
     # bot joined, or the unconfigured-channel handler shows it the door.
@@ -1203,15 +1276,15 @@ def handle_subscribe_channel_submit(
         team_id=team_id,
         acting_user_id=acting_user_id,
         rollback=lambda: helpers.purge_sync_channels([sync_channel_record]),
-        log_event="subscribe_channel_membership_failed",
+        log_event="join_sync_membership_failed",
         log_extra={"workspace_id": workspace_record.id, "channel_id": channel_id, "sync_id": sync_id},
         context=context,
     ):
         return
 
-    publisher_channels: list = []
+    peer_channels: list = []
     try:
-        publisher_channels = DbManager.find_records(
+        peer_channels = DbManager.find_records(
             schemas.SyncChannel,
             [
                 schemas.SyncChannel.sync_id == sync_id,
@@ -1219,36 +1292,54 @@ def handle_subscribe_channel_submit(
                 schemas.SyncChannel.workspace_id != workspace_record.id,
             ],
         )
+        joiner_publishes = helpers.channel_publishes(sync_channel_record)
+        joiner_subscribes = helpers.channel_subscribes(sync_channel_record)
+        local_ref = _format_channel_ref(channel_id, workspace_record, is_local=False)
 
         try:
-            if publisher_channels:
-                pub_ch = publisher_channels[0]
-                pub_ws = helpers.get_workspace_by_id(pub_ch.workspace_id)
-                channel_ref = helpers.resolve_channel_name(pub_ch.channel_id, pub_ws)
+            if peer_channels:
+                peer = peer_channels[0]
+                peer_ws = helpers.get_workspace_by_id(peer.workspace_id)
+                channel_ref = _format_channel_ref(peer.channel_id, peer_ws, is_local=False)
             else:
                 channel_ref = sync_record.title or "the other Channel"
             client.chat_postMessage(
                 channel=channel_id,
-                text=f":arrows_counterclockwise: *{admin_name}* subscribed this Channel to *{channel_ref}*. Messages will be shared automatically.",
+                text=_join_notice(
+                    admin_label=admin_name,
+                    other_ref=channel_ref,
+                    here_publishes=joiner_publishes,
+                    here_subscribes=joiner_subscribes,
+                    there_publishes=helpers.channel_publishes(peer_channels[0]) if peer_channels else True,
+                    there_subscribes=helpers.channel_subscribes(peer_channels[0]) if peer_channels else True,
+                    joined=False,
+                ),
             )
         except Exception as exc:
-            _logger.debug(f"subscribe_channel: failed to notify subscriber channel {channel_id}: {exc}")
+            _logger.debug(f"join_sync: failed to notify joining channel {channel_id}: {exc}")
 
-        local_ref = helpers.resolve_channel_name(channel_id, workspace_record)
-        for pub_ch in publisher_channels:
+        for peer in peer_channels:
             try:
-                pub_ws = helpers.get_workspace_by_id(pub_ch.workspace_id)
-                if pub_ws:
-                    pub_client = WebClient(token=helpers.decrypt_bot_token(pub_ws.bot_token))
+                peer_ws = helpers.get_workspace_by_id(peer.workspace_id)
+                if peer_ws:
+                    pub_client = WebClient(token=helpers.decrypt_bot_token(peer_ws.bot_token))
                     pub_client.chat_postMessage(
-                        channel=pub_ch.channel_id,
-                        text=f":arrows_counterclockwise: *{admin_label}* subscribed *{local_ref}* to this Channel. Messages will be shared automatically.",
+                        channel=peer.channel_id,
+                        text=_join_notice(
+                            admin_label=admin_label,
+                            other_ref=local_ref,
+                            here_publishes=helpers.channel_publishes(peer),
+                            here_subscribes=helpers.channel_subscribes(peer),
+                            there_publishes=joiner_publishes,
+                            there_subscribes=joiner_subscribes,
+                            joined=True,
+                        ),
                     )
             except Exception as exc:
-                _logger.debug(f"subscribe_channel: failed to notify publisher channel {pub_ch.channel_id}: {exc}")
+                _logger.debug(f"join_sync: failed to notify peer channel {peer.channel_id}: {exc}")
 
         _logger.info(
-            "channel_subscribed",
+            "sync_joined",
             extra={
                 "workspace_id": workspace_record.id,
                 "channel_id": channel_id,
@@ -1257,7 +1348,7 @@ def handle_subscribe_channel_submit(
             },
         )
     except Exception as e:
-        _logger.error(f"Failed to subscribe to channel sync {sync_id}: {e}")
+        _logger.error(f"Failed to join channel sync {sync_id}: {e}")
 
     builders.refresh_home_tab_for_workspace(workspace_record, logger, context=context, user_id=user_id)
     if group_id:
@@ -1300,115 +1391,13 @@ def _sync_channel_by_pk(sync_channel_id: int) -> schemas.SyncChannel | None:
     return rows[0] if rows else None
 
 
-def _can_edit_sync_policy(sync: schemas.Sync, workspace_record: schemas.Workspace) -> bool:
-    """Publisher or group owner may change Any vs Specific."""
-    if sync.publisher_workspace_id == workspace_record.id:
-        return True
-    return bool(sync.group_id and helpers.is_workspace_owner(sync.group_id, workspace_record.id))
-
-
-def _who_can_subscribe_blocks(sync: schemas.Sync) -> list[orm.BaseBlock]:
-    """Any vs Specific radios plus optional single-target picker."""
-    mode = sync.sync_mode or "group"
-    if mode not in ("group", "direct"):
-        mode = "group"
-    mode_options = [
-        orm.SelectorOption(
-            name="Available to All Workspaces\nAny current or future Workspace Group Member can subscribe.",
-            value="group",
-        ),
-        orm.SelectorOption(
-            name="Only with Specific Workspace\nChoose a specific Workspace Group Member to allow to subscribe.",
-            value="direct",
-        ),
-    ]
-    blocks: list[orm.BaseBlock] = [
-        orm.InputBlock(
-            label="Who can subscribe",
-            action=actions.CONFIG_PUBLISH_SYNC_MODE,
-            element=orm.RadioButtonsElement(
-                initial_value=mode,
-                options=orm.as_selector_options(
-                    [o.name for o in mode_options],
-                    [o.value for o in mode_options],
-                ),
-            ),
-            optional=False,
-        ),
-        block_context("Any vs Specific can be changed without republishing."),
-    ]
-
-    if not sync.group_id:
-        return blocks
-
-    # Potential Specific targets are group members other than the publisher.
-    publisher_id = sync.publisher_workspace_id
-    group_members = _get_group_members(sync.group_id)
-    ws_options: list[orm.SelectorOption] = []
-    seen: set[str] = set()
-    for member in group_members:
-        if not member.workspace_id or member.workspace_id == publisher_id:
-            continue
-        value = str(member.workspace_id)
-        if value in seen:
-            continue
-        seen.add(value)
-        other_workspace = helpers.get_workspace_by_id(member.workspace_id)
-        name = (
-            helpers.resolve_workspace_name(other_workspace) if other_workspace else f"Workspace {member.workspace_id}"
-        )
-        ws_options.append(orm.SelectorOption(name=name, value=value))
-
-    if ws_options:
-        initial_target = None
-        if sync.target_workspace_id and str(sync.target_workspace_id) in seen:
-            initial_target = str(sync.target_workspace_id)
-        blocks.append(
-            orm.InputBlock(
-                label="Target Workspace",
-                action=actions.CONFIG_PUBLISH_DIRECT_TARGET,
-                element=orm.StaticSelectElement(
-                    placeholder="Select target Workspace",
-                    options=ws_options,
-                    initial_value=initial_target,
-                ),
-                optional=True,
-            )
-        )
-        blocks.append(block_context("Required when who can subscribe is Specific. Leave blank when Available to All."))
-    return blocks
-
-
-def _live_subscriber_workspace_ids(sync_id: int, publisher_workspace_id: int | None) -> set[int]:
-    """Workspace IDs of live SyncChannels that are not the publisher."""
-    channels = DbManager.find_records(
-        schemas.SyncChannel,
-        [schemas.SyncChannel.sync_id == sync_id, schemas.SyncChannel.deleted_at.is_(None)],
-    )
-    return {c.workspace_id for c in channels if c.workspace_id and c.workspace_id != publisher_workspace_id}
-
-
-def _specific_would_drop_subscribers(
-    sync: schemas.Sync,
-    *,
-    target_workspace_id: int | None,
-) -> bool:
-    """True when switching to Specific would leave other live subscribers stranded."""
-    live = _live_subscriber_workspace_ids(sync.id, sync.publisher_workspace_id)
-    if not live:
-        return False
-    if target_workspace_id is None:
-        return True
-    return bool(live - {target_workspace_id})
-
-
 def handle_edit_sync(
     body: dict,
     client: WebClient,
     logger: Logger,
     context: dict,
 ) -> None:
-    """Open the one-step Edit modal for policy and/or this channel's reactions."""
+    """Open the one-step Edit Sync modal for this channel's participation."""
     auth_result = _get_authorized_workspace(body, client, context, "edit_sync")
     if not auth_result:
         return
@@ -1435,37 +1424,41 @@ def handle_edit_sync(
             return
         sync_record = DbManager.get_record(schemas.Sync, id=sync_channel.sync_id)
     else:
-        sync_record = DbManager.get_record(schemas.Sync, id=ref_id)
+        # Available cards no longer expose sync-wide policy editing.
+        return
 
     if not sync_record:
         return
-
-    can_policy = _can_edit_sync_policy(sync_record, workspace_record)
-    if kind == "sync" and not can_policy:
-        _logger.warning("edit_sync: available-row edit denied")
-        return
-
-    from helpers.reactions import reaction_direction
 
     blocks: list[orm.BaseBlock] = []
     metadata: dict = {"sync_id": sync_record.id}
     if sync_channel:
         metadata["sync_channel_id"] = sync_channel.id
-
-    if can_policy:
-        blocks.extend(_who_can_subscribe_blocks(sync_record))
-
-    if sync_channel:
-        direction = reaction_direction(sync_channel)
+        publishes = helpers.channel_publishes(sync_channel)
+        subscribes = helpers.channel_subscribes(sync_channel)
+        ctx = _relationship_context(
+            group_id=sync_record.group_id,
+            local_channel_id=sync_channel.channel_id,
+            local_workspace=workspace_record,
+        )
+        if ctx:
+            blocks.append(ctx)
+        blocks.append(
+            _participation_block(
+                mode="edit",
+                publishes=publishes,
+                subscribes=subscribes,
+            )
+        )
+        blocks.append(block_context(_participation_help(mode="edit")))
         style_initial = _reaction_style_for_edit(sync_channel) or constants.DEFAULT_REACTION_STYLE_NEW_RECEIVE
-        blocks.append(_reaction_direction_block(actions.CONFIG_PUBLISH_REACTION_DIRECTION, initial=direction))
         blocks.append(
             _reaction_style_block(
-                actions.CONFIG_PUBLISH_REACTION_STYLE,
+                actions.CONFIG_SYNC_REACTION_STYLE,
                 initial=style_initial,
             )
         )
-        blocks.append(block_context("Reaction type is used only when this Workspace receives reactions."))
+        blocks.append(block_context(_reaction_style_help(first_time=False)))
 
     if not blocks:
         return
@@ -1474,7 +1467,7 @@ def handle_edit_sync(
         client=client,
         trigger_id=trigger_id,
         callback_id=actions.CONFIG_EDIT_SYNC_SUBMIT,
-        title_text="Edit",
+        title_text="Edit Sync",
         submit_button_text="Save",
         parent_metadata=metadata,
         new_or_add="new",
@@ -1487,61 +1480,10 @@ def handle_edit_sync_submit_ack(
     client: WebClient,
     context: dict,
 ) -> dict | None:
-    """Ack phase: refuse Specific when it would drop live subscribers."""
+    """Ack phase for the participation-only Edit modal."""
     auth_result = _get_authorized_workspace(body, client, context, "edit_sync_submit_ack")
     if not auth_result:
         return None
-    _, workspace_record = auth_result
-
-    metadata = _parse_private_metadata(body)
-    sync_id = metadata.get("sync_id")
-    if not sync_id:
-        return None
-
-    sync_record = DbManager.get_record(schemas.Sync, id=int(sync_id))
-    if not sync_record:
-        return None
-
-    if not _can_edit_sync_policy(sync_record, workspace_record):
-        return None
-
-    # Only validate when the mode field is present (policy editors see it).
-    values = helpers.safe_get(body, "view", "state", "values") or {}
-    has_mode = any(actions.CONFIG_PUBLISH_SYNC_MODE in block for block in values.values())
-    if not has_mode:
-        return None
-
-    sync_mode = _get_selected_option_value(body, actions.CONFIG_PUBLISH_SYNC_MODE) or "group"
-    if sync_mode != "direct":
-        return None
-
-    target_raw = _get_selected_option_value(body, actions.CONFIG_PUBLISH_DIRECT_TARGET)
-    target_workspace_id: int | None = None
-    if target_raw:
-        try:
-            target_workspace_id = int(target_raw)
-        except (TypeError, ValueError):
-            target_workspace_id = None
-
-    if target_workspace_id is None:
-        return {
-            "response_action": "errors",
-            "errors": {
-                actions.CONFIG_PUBLISH_DIRECT_TARGET: (
-                    "Pick a specific Workspace, or switch Who can subscribe back to Available to All."
-                ),
-            },
-        }
-
-    if _specific_would_drop_subscribers(sync_record, target_workspace_id=target_workspace_id):
-        return {
-            "response_action": "errors",
-            "errors": {
-                actions.CONFIG_PUBLISH_SYNC_MODE: (
-                    "Other Workspaces are already subscribed. They must Stop Syncing first, or keep Available to All."
-                ),
-            },
-        }
     return None
 
 
@@ -1551,7 +1493,7 @@ def handle_edit_sync_submit(
     logger: Logger,
     context: dict,
 ) -> None:
-    """Persist policy (when allowed) and this channel's reaction settings."""
+    """Persist this channel's participation and reaction type."""
     auth_result = _get_authorized_workspace(body, client, context, "edit_sync_submit")
     if not auth_result:
         return
@@ -1567,53 +1509,26 @@ def handle_edit_sync_submit(
     if not sync_record:
         return
 
-    mode_changed = False
-    if _can_edit_sync_policy(sync_record, workspace_record):
-        values = helpers.safe_get(body, "view", "state", "values") or {}
-        has_mode = any(actions.CONFIG_PUBLISH_SYNC_MODE in block for block in values.values())
-        if has_mode:
-            sync_mode = _get_selected_option_value(body, actions.CONFIG_PUBLISH_SYNC_MODE) or "group"
-            if sync_mode not in ("group", "direct"):
-                sync_mode = "group"
-            target_workspace_id: int | None = None
-            if sync_mode == "direct":
-                target_raw = _get_selected_option_value(body, actions.CONFIG_PUBLISH_DIRECT_TARGET)
-                try:
-                    target_workspace_id = int(target_raw) if target_raw else None
-                except (TypeError, ValueError):
-                    target_workspace_id = None
-                if target_workspace_id is None or _specific_would_drop_subscribers(
-                    sync_record, target_workspace_id=target_workspace_id
-                ):
-                    # Ack should have blocked; skip policy write.
-                    sync_mode = None
-            if sync_mode is not None:
-                new_target = target_workspace_id if sync_mode == "direct" else None
-                if sync_record.sync_mode != sync_mode or sync_record.target_workspace_id != new_target:
-                    DbManager.update_records(
-                        schemas.Sync,
-                        [schemas.Sync.id == sync_record.id],
-                        {
-                            schemas.Sync.sync_mode: sync_mode,
-                            schemas.Sync.target_workspace_id: new_target,
-                        },
-                    )
-                    mode_changed = True
-
     if sync_channel_id:
         sync_channel = _sync_channel_by_pk(int(sync_channel_id))
         if sync_channel and sync_channel.workspace_id == workspace_record.id:
-            direction = (
-                _get_selected_option_value(body, actions.CONFIG_PUBLISH_REACTION_DIRECTION)
-                or constants.REACTION_DIRECTION_BOTH
-            )
-            from helpers.reactions import update_sync_channel_reactions
+            publishes, subscribes = _participation_from_body(body)
+            from helpers.reaction import update_sync_channel_reactions
 
-            style = _reaction_style_for_edit(sync_channel, body, direction=direction)
-            update_sync_channel_reactions(int(sync_channel_id), direction=direction, style=style)
+            style = _reaction_style_for_edit(sync_channel, body, subscribes=subscribes)
+            if subscribes and style is None:
+                from helpers.reaction import default_reaction_style_for_new_channel
+
+                style = default_reaction_style_for_new_channel(subscribes=True)
+            update_sync_channel_reactions(
+                int(sync_channel_id),
+                style=style,
+                publishes=publishes,
+                subscribes=subscribes,
+            )
 
     builders.refresh_home_tab_for_workspace(workspace_record, logger, context=context, user_id=user_id)
-    if mode_changed and sync_record.group_id:
+    if sync_record.group_id:
         _refresh_group_member_homes(sync_record.group_id, workspace_record.id, logger, context=context)
 
 

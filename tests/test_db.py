@@ -465,6 +465,51 @@ class TestAlembic013MappedAt:
                 db_mod.GLOBAL_SCHEMA = old_schema
 
 
+class TestAlembicRevisionIds:
+    def test_revision_ids_fit_mysql_version_num(self):
+        from alembic.script import ScriptDirectory
+
+        from db import _alembic_config
+
+        script = ScriptDirectory.from_config(_alembic_config())
+        too_long = [rev.revision for rev in script.walk_revisions() if len(rev.revision) > 32]
+        assert too_long == [], f"alembic_version.version_num is VARCHAR(32): {too_long}"
+
+
+class TestAlembic014PostedAsAndPublishSubscribe:
+    def test_adds_posted_as_and_participation_when_rewound_to_013(self, tmp_path):
+        from alembic import command
+
+        import db as db_mod
+        from db import _alembic_config, get_engine, initialize_database
+
+        url = f"sqlite:///{tmp_path / 'alembic014.db'}"
+        old_engine = db_mod.GLOBAL_ENGINE
+        old_schema = db_mod.GLOBAL_SCHEMA
+        with patch.dict(os.environ, {"DATABASE_BACKEND": "sqlite", "DATABASE_URL": url}, clear=False):
+            try:
+                db_mod.GLOBAL_ENGINE = None
+                db_mod.GLOBAL_SCHEMA = None
+                initialize_database()
+                engine = get_engine()
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE post_meta DROP COLUMN posted_as_user_id"))
+                    conn.execute(text("ALTER TABLE sync_channels DROP COLUMN publishes"))
+                    conn.execute(text("ALTER TABLE sync_channels DROP COLUMN subscribes"))
+                    conn.execute(text("UPDATE alembic_version SET version_num = '013_user_mapping_mapped_at'"))
+                command.upgrade(_alembic_config(), "head")
+                post_cols = {c["name"] for c in inspect(engine).get_columns("post_meta")}
+                sync_cols = {c["name"] for c in inspect(engine).get_columns("sync_channels")}
+                assert "posted_as_user_id" in post_cols
+                assert "publishes" in sync_cols
+                assert "subscribes" in sync_cols
+            finally:
+                if db_mod.GLOBAL_ENGINE:
+                    db_mod.GLOBAL_ENGINE.dispose()
+                db_mod.GLOBAL_ENGINE = old_engine
+                db_mod.GLOBAL_SCHEMA = old_schema
+
+
 class TestAlembic009WidenTokens:
     def test_widens_varchar_token_column_when_rewound_to_008(self, tmp_path):
         from alembic import command

@@ -15,6 +15,7 @@ from helpers.slack_api import slack_error_code
 from helpers.user_action_echo import slack_message_ts
 
 _logger = logging.getLogger(__name__)
+_slack_error_code = slack_error_code
 
 
 def actor_key_for_notice(
@@ -37,7 +38,7 @@ def reaction_notice_post_id(
     source_workspace_id: int | None,
     federated_instance_id: str | None = None,
 ) -> str:
-    """Shared ``post_id`` for every dest copy of the same logical Hybrid reaction."""
+    """Shared ``post_id`` for every target copy of the same logical Hybrid reaction."""
     actor_key = actor_key_for_notice(source_workspace_id, federated_instance_id=federated_instance_id)
     payload = f"{parent_post_id}\0{reaction}\0{actor_key}\0{source_user_id}"
     digest = hashlib.sha256(payload.encode()).hexdigest()[:32]
@@ -79,7 +80,7 @@ def chat_delete_notice(client: WebClient, channel_id: str, ts: float | str) -> N
     try:
         client.chat_delete(channel=channel_id, ts=slack_message_ts(ts))
     except SlackApiError as exc:
-        if slack_error_code(exc) == "message_not_found":
+        if _slack_error_code(exc) == "message_not_found":
             return
         raise
 
@@ -162,7 +163,7 @@ def delete_notices_for_unreact(
     event_user_id: str,
     client: WebClient,
 ) -> None:
-    """Delete matching Hybrid notices on one dest channel (children first)."""
+    """Delete matching Hybrid notices on one target channel (children first)."""
     actor_pairs = equivalent_actor_pairs(event_workspace_id, event_user_id)
     notices = find_notices_for_unreact(
         parent_post_id=parent_post_id,
@@ -176,7 +177,7 @@ def delete_notices_for_unreact(
         return
 
     style = (getattr(sync_channel, "reaction_style", None) or "").strip()
-    if style == constants.REACTION_STYLE_DIRECT_ONLY:
+    if style in (constants.REACTION_STYLE_DIRECT_ONLY, constants.REACTION_STYLE_OFF):
         return
     if not style:
         return
@@ -222,7 +223,7 @@ def _delete_leftover_thread_notices(
     except SlackApiError as exc:
         _logger.debug(
             "leftover_notice_thread_scan_failed",
-            extra={"channel_id": channel_id, "error": slack_error_code(exc) or str(exc)},
+            extra={"channel_id": channel_id, "error": _slack_error_code(exc) or str(exc)},
         )
         return
 
@@ -267,7 +268,7 @@ def tombstone_reaction_notice_locally(
     sync_channel: schemas.SyncChannel,
     client: WebClient,
 ) -> None:
-    """Dest user deleted a Hybrid notice — local tombstone only (no origin unreact)."""
+    """Target user deleted a Hybrid notice — local tombstone only (no origin unreact)."""
     children = _child_notices_on_channel(notice.post_id, sync_channel.id)
     for child in children:
         chat_delete_notice(client, sync_channel.channel_id, child.ts)

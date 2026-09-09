@@ -11,22 +11,21 @@ from handlers._common import (
     _sanitize_text,
 )
 from handlers.channel_sync import (
+    handle_create_sync,
+    handle_create_sync_submit_ack,
+    handle_create_sync_submit_work,
     handle_edit_sync,
     handle_edit_sync_submit,
     handle_edit_sync_submit_ack,
+    handle_join_sync,
+    handle_join_sync_submit,
+    handle_join_sync_submit_ack,
+    handle_leave_sync,
+    handle_leave_sync_confirm,
     handle_pause_sync,
-    handle_publish_channel,
-    handle_publish_channel_submit_ack,
-    handle_publish_channel_submit_work,
-    handle_publish_mode_submit_ack,
+    handle_pause_sync_confirm,
     handle_resume_sync,
-    handle_stop_sync,
-    handle_stop_sync_confirm,
-    handle_subscribe_channel,
-    handle_subscribe_channel_submit,
-    handle_subscribe_channel_submit_ack,
-    handle_subscribe_direction_submit_ack,
-    handle_unpublish_channel,
+    handle_resume_sync_confirm,
 )
 from handlers.export_import import (
     handle_backup_download,
@@ -47,15 +46,7 @@ from handlers.federation_cmds import (
     handle_generate_federation_code,
     handle_remove_federation_connection,
 )
-from handlers.group_manage import (
-    handle_demote_self,
-    handle_disband_group,
-    handle_disband_group_confirm,
-    handle_leave_group,
-    handle_leave_group_confirm,
-    handle_promote_to_owner,
-)
-from handlers.groups import (
+from handlers.group import (
     handle_accept_group_invite,
     handle_create_group,
     handle_create_group_submit,
@@ -65,12 +56,20 @@ from handlers.groups import (
     handle_join_group,
     handle_join_group_submit,
 )
-from handlers.messages import (
-    _handle_reaction,
+from handlers.group_manage import (
+    handle_demote_self,
+    handle_disband_group,
+    handle_disband_group_confirm,
+    handle_leave_group,
+    handle_leave_group_confirm,
+    handle_promote_to_owner,
+)
+from handlers.message import (
     _is_own_bot_message,
     _parse_event_fields,
     respond_to_message_event,
 )
+from handlers.reaction_event import _handle_reaction
 from handlers.settings import handle_open_settings, handle_settings_submit
 from handlers.sync import (
     handle_app_home_opened,
@@ -133,27 +132,26 @@ __all__ = [
     "handle_settings_submit",
     "handle_member_joined_channel",
     "handle_pause_sync",
-    "handle_publish_channel",
-    "handle_publish_channel_submit_ack",
-    "handle_publish_channel_submit_work",
-    "handle_publish_mode_submit_ack",
+    "handle_pause_sync_confirm",
+    "handle_create_sync",
+    "handle_create_sync_submit_ack",
+    "handle_create_sync_submit_work",
     "handle_authorize_syncbot",
     "handle_refresh_home",
     "handle_remove_federation_connection",
     "handle_resume_sync",
-    "handle_stop_sync",
-    "handle_stop_sync_confirm",
-    "handle_subscribe_channel",
-    "handle_subscribe_channel_submit",
-    "handle_subscribe_channel_submit_ack",
-    "handle_subscribe_direction_submit_ack",
+    "handle_resume_sync_confirm",
+    "handle_leave_sync",
+    "handle_leave_sync_confirm",
+    "handle_join_sync",
+    "handle_join_sync_submit",
+    "handle_join_sync_submit_ack",
     "handle_edit_sync",
     "handle_edit_sync_submit",
     "handle_edit_sync_submit_ack",
     "handle_team_join",
     "handle_tokens_revoked",
     "handle_app_uninstalled",
-    "handle_unpublish_channel",
     "handle_user_mapping_auto_map",
     "handle_user_mapping_edit_submit",
     "handle_user_mapping_page",

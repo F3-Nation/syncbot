@@ -1,0 +1,38 @@
+---
+description: Leading Slack emoji on action buttons and notices
+globs: "**/builders/**/*.py,**/handlers/**/*.py,**/slack/blocks.py"
+alwaysApply: false
+---
+
+# Slack action icons
+
+Lead Home/modal **action buttons** and in-channel/DM **action notices** with one Slack shortcode. Reuse this vocabulary; do not invent a new name for the same meaning.
+
+| Meaning | Shortcode |
+| pause | `:double_vertical_bar:` |
+| resume | `:arrow_forward:` |
+| leave / stop / end a connection | `:octagonal_sign:` |
+| live sync / Refresh | `:arrows_counterclockwise:` |
+| edit | `:pencil2:` |
+| publish / waiting / export | `:outbox_tray:` |
+| join available | `:inbox_tray:` |
+| confirm / error | `:warning:` |
+| settings | `:gear:` |
+| invite workspace | `:incoming_envelope:` |
+| managers only / cannot | `:lock:` |
+| left a group / hello | `:wave:` |
+| group invite or join | `:punch:` |
+| new group | `:raised_hands:` |
+| accept / granted | `:white_check_mark:` |
+| decline / cancel | `:x:` |
+| federation | `:globe_with_meridians:` |
+| connection code | `:link:` |
+| data migration | `:package:` |
+| backup | `:floppy_disk:` |
+| reset (danger) | `:bomb:` |
+| disband / purge | `:wastebasket:` |
+| owner | `:key:` |
+| give up ownership | `:information_source:` |
+| mapping people | `:busts_in_silhouette:` |
+
+Do not icon form field labels, context metadata (Status, Members), modal titles, or the Authorize URL button. One leading emoji per control or notice, then the same wording as today.

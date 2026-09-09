@@ -15,7 +15,7 @@ from handlers import (
     _parse_event_fields,
     _sanitize_text,
 )
-from handlers.groups import _generate_invite_code
+from handlers.group import _generate_invite_code
 
 # -----------------------------------------------------------------------
 # _parse_event_fields
@@ -327,3 +327,15 @@ class TestRequestTypeGroupPrefix:
         req_type, req_id = get_request_type(body)
         assert req_type == "block_actions"
         assert req_id == actions.CONFIG_LEAVE_GROUP
+
+    def test_join_sync_picker_does_not_collapse_onto_join_sync(self):
+        from helpers import get_request_type
+        from slack import actions
+
+        body = {
+            "type": "block_actions",
+            "actions": [{"action_id": actions.CONFIG_JOIN_SYNC_SELECT}],
+        }
+        req_type, req_id = get_request_type(body)
+        assert req_type == "block_actions"
+        assert req_id == actions.CONFIG_JOIN_SYNC_SELECT

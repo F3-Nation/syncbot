@@ -161,8 +161,8 @@ emit_override_lines() {
   printf 'SlackClientID=%s\n' "${SLACK_CLIENT_ID}"
   printf 'SlackClientSecret=%s\n' "${SLACK_CLIENT_SECRET}"
   printf 'SlackSigningSecret=%s\n' "${SLACK_SIGNING_SECRET}"
-  printf 'SlackOauthBotScopes=%s\n' "${SLACK_BOT_SCOPES:-app_mentions:read,channels:history,channels:join,channels:read,channels:manage,chat:write,chat:write.customize,files:read,files:write,groups:history,groups:read,groups:write,im:write,reactions:read,reactions:write,team:read,users:read,users:read.email}"
-  printf 'SlackOauthUserScopes=%s\n' "${SLACK_USER_SCOPES:-chat:write,channels:history,channels:read,files:read,files:write,groups:history,groups:read,groups:write,im:write,reactions:read,reactions:write,team:read,users:read,users:read.email}"
+  printf 'SlackOauthBotScopes=%s\n' "${SLACK_BOT_SCOPES:-app_mentions:read,channels:history,channels:join,channels:read,channels:manage,chat:write,chat:write.customize,emoji:read,files:read,files:write,groups:history,groups:read,groups:write,im:write,reactions:read,reactions:write,team:read,usergroups:read,users:read,users:read.email}"
+  printf 'SlackOauthUserScopes=%s\n' "${SLACK_USER_SCOPES:-chat:write,channels:history,channels:read,files:read,files:write,groups:history,groups:read,groups:write,reactions:read,reactions:write,team:read,users:read,users:read.email}"
 }
 
 # Single line for sam deploy --parameter-overrides (omit Key= — sam rejects empty values).

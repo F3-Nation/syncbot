@@ -193,14 +193,16 @@ _PREFIXED_ACTIONS = (
     actions.CONFIG_PROMOTE_TO_OWNER,
     actions.CONFIG_DEMOTE_SELF,
     actions.CONFIG_DISBAND_GROUP,
-    actions.CONFIG_SUBSCRIBE_CHANNEL,
+    actions.CONFIG_JOIN_SYNC,
     actions.CONFIG_EDIT_SYNC,
-    actions.CONFIG_UNPUBLISH_CHANNEL,
+    actions.CONFIG_LEAVE_SYNC,
     actions.CONFIG_USER_MAPPING_EDIT,
     actions.CONFIG_RESUME_SYNC,
     actions.CONFIG_PAUSE_SYNC,
-    actions.CONFIG_STOP_SYNC,
 )
+# ``create_sync`` is not prefixed so ``create_sync_select`` stays a picker.
+# ``join_sync`` is prefixed (Home buttons are ``join_sync_{id}``), so the Join
+# Sync picker must not start with ``join_sync_`` (see CONFIG_JOIN_SYNC_SELECT).
 
 
 def get_request_type(body: dict) -> tuple[str, str]:

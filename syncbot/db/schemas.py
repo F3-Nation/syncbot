@@ -23,7 +23,7 @@ Tables:
 
 from typing import Any
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.types import DECIMAL
 
@@ -145,12 +145,14 @@ class SyncChannel(BaseClass, GetDBClass):
     status = Column(String(20), nullable=False, default="active")
     reaction_direction = Column(String(32), nullable=False, default="both")
     reaction_style = Column(String(32), nullable=True)
+    publishes = Column(Boolean, nullable=False, default=True)
+    subscribes = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False)
     deleted_at = Column(DateTime, nullable=True, default=None)
 
     def get_id():
-        """Slack ``channel_id``, not the integer primary key."""
-        return SyncChannel.channel_id
+        """Integer primary key (a Slack channel may appear on several syncs)."""
+        return SyncChannel.id
 
 
 class PostMeta(BaseClass, GetDBClass):
@@ -164,6 +166,7 @@ class PostMeta(BaseClass, GetDBClass):
     reaction = Column(String(100), nullable=True)
     source_user_id = Column(String(100), nullable=True)
     source_workspace_id = Column(Integer, nullable=True)
+    posted_as_user_id = Column(String(100), nullable=True)
 
     def get_id():
         """Slack ``post_id``, not the integer primary key."""

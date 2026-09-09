@@ -3,9 +3,29 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from handlers.messages import _same_instance_dest_post
 from helpers.core import format_file_share_notice, synced_from_line_username
+from helpers.slack_write import slack_write_create
 from tests.event_fixtures import make_event_context
+
+
+def _write(ctx, direct_files, *, user_name="Ada", thread_ts=None):
+    return slack_write_create(
+        envelope={
+            "source_workspace_id": 1,
+            "source_user_id": ctx["user_id"],
+            "user_name": user_name,
+            "user_avatar_url": "https://src/icon",
+            "workspace_name": "Workspace A",
+            "text": ctx["msg_text"],
+            "blocks": ctx.get("content_blocks") or [],
+            "file_refs": direct_files or [],
+            "reply_broadcast": bool(ctx.get("reply_broadcast")),
+        },
+        sync_channel=SimpleNamespace(channel_id="C_TGT", id=2),
+        workspace=SimpleNamespace(id=2, team_id="T2", bot_token="enc"),
+        source_client=MagicMock(),
+        thread_ts=thread_ts,
+    )
 
 
 class TestFromLineUsername:
@@ -36,30 +56,22 @@ class TestFileOnlyAuthorAttribution:
     def test_pdf_uses_single_upload_with_ticked_notice(self):
         ctx = make_event_context(msg_text=" ", user_id="U_SRC", reply_broadcast=False)
         with (
-            patch("handlers.messages.helpers.decrypt_bot_token", return_value="xoxb"),
-            patch("handlers.messages.WebClient"),
+            patch("helpers.slack_write.decrypt_bot_token", return_value="xoxb"),
+            patch("helpers.slack_write.WebClient"),
             patch(
-                "handlers.messages.helpers.get_display_name_and_icon_for_synced_message",
+                "helpers.slack_write.get_display_name_and_icon_for_synced_message",
                 return_value=("Ada Lovelace", "https://icon", False, None),
             ),
-            patch("handlers.messages.helpers.apply_mentioned_users", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.get_workspace_by_id", return_value=None),
-            patch("handlers.messages.helpers.post_message") as post_msg,
-            patch("handlers.messages.helpers.upload_files_to_slack", return_value=(None, "200.0")) as upload,
+            patch("helpers.slack_write.apply_mentioned_users", side_effect=lambda t, *_a, **_k: t),
+            patch("helpers.slack_write.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
+            patch("helpers.workspace.get_workspace_by_id", return_value=None),
+            patch("helpers.slack_write.post_message") as post_msg,
+            patch("helpers.slack_write.upload_files_to_slack", return_value=(None, "200.0")) as upload,
         ):
-            ts, split = _same_instance_dest_post(
-                body={"event": {"ts": "1.0"}},
-                client=MagicMock(),
-                ctx=ctx,
-                photo_blocks=[],
-                direct_files=[{"path": "/tmp/a.pdf", "name": "a.pdf", "mimetype": "application/pdf"}],
-                sync_channel=SimpleNamespace(channel_id="C_TGT", id=2),
-                workspace=SimpleNamespace(id=2, bot_token="enc"),
-                source_workspace_id=1,
+            ts, split, _posted_as = _write(
+                ctx,
+                [{"path": "/tmp/a.pdf", "name": "a.pdf", "mimetype": "application/pdf"}],
                 user_name="Ada Lovelace",
-                user_profile_url="https://src/icon",
-                workspace_name="Workspace A",
             )
         assert split is None
         assert ts == "200.0"
@@ -71,30 +83,21 @@ class TestFileOnlyAuthorAttribution:
     def test_file_only_thread_reply_uses_parent_thread_ts(self):
         ctx = make_event_context(msg_text="", user_id="U_SRC", reply_broadcast=False)
         with (
-            patch("handlers.messages.helpers.decrypt_bot_token", return_value="xoxb"),
-            patch("handlers.messages.WebClient"),
+            patch("helpers.slack_write.decrypt_bot_token", return_value="xoxb"),
+            patch("helpers.slack_write.WebClient"),
             patch(
-                "handlers.messages.helpers.get_display_name_and_icon_for_synced_message",
+                "helpers.slack_write.get_display_name_and_icon_for_synced_message",
                 return_value=("Ada", "https://icon", True, "U_MAP"),
             ),
-            patch("handlers.messages.helpers.apply_mentioned_users", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.get_workspace_by_id", return_value=None),
-            patch("handlers.messages.helpers.post_message") as post_msg,
-            patch("handlers.messages.helpers.upload_files_to_slack", return_value=(None, "350.0")) as upload,
+            patch("helpers.slack_write.apply_mentioned_users", side_effect=lambda t, *_a, **_k: t),
+            patch("helpers.slack_write.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
+            patch("helpers.workspace.get_workspace_by_id", return_value=None),
+            patch("helpers.slack_write.post_message") as post_msg,
+            patch("helpers.slack_write.upload_files_to_slack", return_value=(None, "350.0")) as upload,
         ):
-            ts, split = _same_instance_dest_post(
-                body={"event": {"ts": "150.0"}},
-                client=MagicMock(),
-                ctx=ctx,
-                photo_blocks=[],
-                direct_files=[{"path": "/tmp/a.pdf", "name": "a.pdf", "mimetype": "application/pdf"}],
-                sync_channel=SimpleNamespace(channel_id="C_TGT", id=2),
-                workspace=SimpleNamespace(id=2, bot_token="enc"),
-                source_workspace_id=1,
-                user_name="Ada",
-                user_profile_url="https://src/icon",
-                workspace_name="Workspace A",
+            ts, split, _posted_as = _write(
+                ctx,
+                [{"path": "/tmp/a.pdf", "name": "a.pdf", "mimetype": "application/pdf"}],
                 thread_ts="20.000000",
             )
         assert split is None
@@ -106,31 +109,19 @@ class TestFileOnlyAuthorAttribution:
     def test_image_file_uses_same_notice_as_pdf(self):
         ctx = make_event_context(msg_text="", user_id="U_SRC", reply_broadcast=False)
         with (
-            patch("handlers.messages.helpers.decrypt_bot_token", return_value="xoxb"),
-            patch("handlers.messages.WebClient"),
+            patch("helpers.slack_write.decrypt_bot_token", return_value="xoxb"),
+            patch("helpers.slack_write.WebClient"),
             patch(
-                "handlers.messages.helpers.get_display_name_and_icon_for_synced_message",
+                "helpers.slack_write.get_display_name_and_icon_for_synced_message",
                 return_value=("Ada", "https://icon", True, "U_MAP"),
             ),
-            patch("handlers.messages.helpers.apply_mentioned_users", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.get_workspace_by_id", return_value=None),
-            patch("handlers.messages.helpers.post_message") as post_msg,
-            patch("handlers.messages.helpers.upload_files_to_slack", return_value=(None, "200.0")) as upload,
+            patch("helpers.slack_write.apply_mentioned_users", side_effect=lambda t, *_a, **_k: t),
+            patch("helpers.slack_write.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
+            patch("helpers.workspace.get_workspace_by_id", return_value=None),
+            patch("helpers.slack_write.post_message") as post_msg,
+            patch("helpers.slack_write.upload_files_to_slack", return_value=(None, "200.0")) as upload,
         ):
-            _same_instance_dest_post(
-                body={"event": {"ts": "1.0"}},
-                client=MagicMock(),
-                ctx=ctx,
-                photo_blocks=[],
-                direct_files=[{"path": "/tmp/a.png", "name": "photo.png", "mimetype": "image/png"}],
-                sync_channel=SimpleNamespace(channel_id="C_TGT", id=2),
-                workspace=SimpleNamespace(id=2, bot_token="enc"),
-                source_workspace_id=1,
-                user_name="Ada",
-                user_profile_url="https://src/icon",
-                workspace_name="Workspace A",
-            )
+            _write(ctx, [{"path": "/tmp/a.png", "name": "photo.png", "mimetype": "image/png"}])
         post_msg.assert_not_called()
         assert upload.call_args.kwargs["initial_comment"] == "`Ada` shared a file"
         assert upload.call_args.kwargs["thread_ts"] is None
@@ -140,31 +131,19 @@ class TestTextPlusFileUpload:
     def test_threaded_file_uses_same_notice(self):
         ctx = make_event_context(msg_text="see attached", user_id="U_SRC", reply_broadcast=False)
         with (
-            patch("handlers.messages.helpers.decrypt_bot_token", return_value="xoxb"),
-            patch("handlers.messages.WebClient"),
+            patch("helpers.slack_write.decrypt_bot_token", return_value="xoxb"),
+            patch("helpers.slack_write.WebClient"),
             patch(
-                "handlers.messages.helpers.get_display_name_and_icon_for_synced_message",
+                "helpers.slack_write.get_display_name_and_icon_for_synced_message",
                 return_value=("Ada", "https://icon", True, "U_MAP"),
             ),
-            patch("handlers.messages.helpers.apply_mentioned_users", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.get_workspace_by_id", return_value=None),
-            patch("handlers.messages.helpers.post_message", return_value={"ts": "100.0"}),
-            patch("handlers.messages.helpers.upload_files_to_slack", return_value=(None, "200.0")) as upload_files,
+            patch("helpers.slack_write.apply_mentioned_users", side_effect=lambda t, *_a, **_k: t),
+            patch("helpers.slack_write.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
+            patch("helpers.workspace.get_workspace_by_id", return_value=None),
+            patch("helpers.slack_write.post_message", return_value={"ts": "100.0"}),
+            patch("helpers.slack_write.upload_files_to_slack", return_value=(None, "200.0")) as upload_files,
         ):
-            _same_instance_dest_post(
-                body={"event": {"ts": "1.0"}},
-                client=MagicMock(),
-                ctx=ctx,
-                photo_blocks=[],
-                direct_files=[{"path": "/tmp/a.pdf", "name": "a.pdf"}],
-                sync_channel=SimpleNamespace(channel_id="C_TGT", id=2),
-                workspace=SimpleNamespace(id=2, bot_token="enc"),
-                source_workspace_id=1,
-                user_name="Ada",
-                user_profile_url="https://src/icon",
-                workspace_name="Workspace A",
-            )
+            _write(ctx, [{"path": "/tmp/a.pdf", "name": "a.pdf"}])
         assert upload_files.call_args.kwargs["initial_comment"] == "`Ada` shared a file"
         assert upload_files.call_args.kwargs["thread_ts"] == "100.0"
         assert upload_files.call_args.kwargs["reply_broadcast"] is True
@@ -172,30 +151,21 @@ class TestTextPlusFileUpload:
     def test_thread_reply_text_plus_file_uploads_at_parent_thread(self):
         ctx = make_event_context(msg_text="see attached", user_id="U_SRC", reply_broadcast=False)
         with (
-            patch("handlers.messages.helpers.decrypt_bot_token", return_value="xoxb"),
-            patch("handlers.messages.WebClient"),
+            patch("helpers.slack_write.decrypt_bot_token", return_value="xoxb"),
+            patch("helpers.slack_write.WebClient"),
             patch(
-                "handlers.messages.helpers.get_display_name_and_icon_for_synced_message",
+                "helpers.slack_write.get_display_name_and_icon_for_synced_message",
                 return_value=("Ada", "https://icon", True, "U_MAP"),
             ),
-            patch("handlers.messages.helpers.apply_mentioned_users", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
-            patch("handlers.messages.helpers.get_workspace_by_id", return_value=None),
-            patch("handlers.messages.helpers.post_message", return_value={"ts": "250.0"}),
-            patch("handlers.messages.helpers.upload_files_to_slack", return_value=(None, "350.0")) as upload_files,
+            patch("helpers.slack_write.apply_mentioned_users", side_effect=lambda t, *_a, **_k: t),
+            patch("helpers.slack_write.resolve_channel_references", side_effect=lambda t, *_a, **_k: t),
+            patch("helpers.workspace.get_workspace_by_id", return_value=None),
+            patch("helpers.slack_write.post_message", return_value={"ts": "250.0"}),
+            patch("helpers.slack_write.upload_files_to_slack", return_value=(None, "350.0")) as upload_files,
         ):
-            _same_instance_dest_post(
-                body={"event": {"ts": "150.0"}},
-                client=MagicMock(),
-                ctx=ctx,
-                photo_blocks=[],
-                direct_files=[{"path": "/tmp/a.pdf", "name": "a.pdf"}],
-                sync_channel=SimpleNamespace(channel_id="C_TGT", id=2),
-                workspace=SimpleNamespace(id=2, bot_token="enc"),
-                source_workspace_id=1,
-                user_name="Ada",
-                user_profile_url="https://src/icon",
-                workspace_name="Workspace A",
+            _write(
+                ctx,
+                [{"path": "/tmp/a.pdf", "name": "a.pdf"}],
                 thread_ts="20.000000",
             )
         assert upload_files.call_args.kwargs["thread_ts"] == "20.000000"

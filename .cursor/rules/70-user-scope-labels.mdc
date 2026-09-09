@@ -10,4 +10,6 @@ Do not paste Slack API names (`groups:write`) onto the Home tab. `USER_PERMISSIO
 
 When adding a **user** scope: update `USER_SCOPES` *and* a group (fold a read/write twin into an existing row, or add a 2–4 word label). Look up the user-token meaning on https://docs.slack.dev/reference/scopes. Keep `groups:write` as its own line. A group is already-allowed only when every scope in it is granted; first-time authorize hides the already-allowed list.
 
+Direct messages are sent by the bot. Do not add user `im:write` or describe Authorize SyncBot as permission to send DMs as the user.
+
 `tests/test_slack_manifest_scopes.py` requires every `USER_SCOPE` in exactly one group. See `AGENTS.md` and `docs/AI_AGENTS.md`.

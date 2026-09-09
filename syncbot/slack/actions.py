@@ -134,63 +134,60 @@ CONFIG_SETTINGS_FEDERATION_ENABLED = "settings_federation_enabled"
 # Channel Sync actions
 # ---------------------------------------------------------------------------
 
-CONFIG_PUBLISH_CHANNEL = "publish_channel"
-"""Action: user clicked "Publish Channel" button (value carries group_id)."""
+CONFIG_CREATE_SYNC = "create_sync"
+"""Action: user clicked "Create Sync" (value carries group_id)."""
 
-CONFIG_PUBLISH_CHANNEL_SELECT = "publish_channel_select"
-"""Input: channel picker in the publish channel modal."""
+CONFIG_CREATE_SYNC_SELECT = "create_sync_select"
+"""Input: channel picker in the Create Sync modal."""
 
-CONFIG_PUBLISH_CHANNEL_SUBMIT = "publish_channel_submit"
-"""Callback: publish channel modal submitted."""
+CONFIG_CREATE_SYNC_SUBMIT = "create_sync_submit"
+"""Callback: Create Sync modal submitted."""
 
-CONFIG_PUBLISH_MODE_SUBMIT = "publish_mode_submit"
-"""Callback: step 1 of publish channel (sync mode selection) submitted."""
+CONFIG_JOIN_SYNC = "join_sync"
+"""Action: user clicked "Join Sync" on an available relationship (prefix-matched with sync_id)."""
 
-CONFIG_PUBLISH_SYNC_MODE = "publish_sync_mode"
-"""Input: radio buttons for direct vs group-wide sync mode."""
+CONFIG_JOIN_SYNC_SELECT = "select_join_sync"
+"""Input: channel picker in the Join Sync modal.
 
-CONFIG_PUBLISH_DIRECT_TARGET = "publish_direct_target"
-"""Input: workspace picker for direct (1-to-1) sync target."""
+Not ``join_sync_select``: that string is prefix-matched onto ``CONFIG_JOIN_SYNC``
+in ``helpers.core._PREFIXED_ACTIONS`` and would re-open Join Sync when the user
+picks a Channel."""
 
-CONFIG_PUBLISH_REACTION_DIRECTION = "publish_reaction_direction"
-CONFIG_PUBLISH_REACTION_STYLE = "publish_reaction_style"
+CONFIG_JOIN_SYNC_SUBMIT = "join_sync_submit"
+"""Callback: Join Sync modal submitted."""
+
+CONFIG_SYNC_PARTICIPATION = "sync_participation"
+"""Input: Publish only / Subscribe only / Publish and Subscribe."""
+
+CONFIG_SYNC_REACTION_STYLE = "sync_reaction_style"
+"""Input: Hybrid, Direct, or Off on Create, Join, and Edit Sync."""
 
 CONFIG_EDIT_SYNC = "edit_sync"
-"""Action: user clicked Edit on a synced Channel row (prefix-matched; value encodes channel or sync)."""
+"""Action: user clicked Edit Sync on a synced Channel row (prefix-matched; value encodes channel or sync)."""
 
 CONFIG_EDIT_SYNC_SUBMIT = "edit_sync_submit"
-"""Callback: Edit modal submitted (policy and/or reactions)."""
+"""Callback: Edit Sync modal submitted (participation and/or reactions)."""
 
-CONFIG_UNPUBLISH_CHANNEL = "unpublish_channel"
-"""Action: user clicked "Unpublish" on a published channel (prefix-matched with sync.id)."""
+CONFIG_LEAVE_SYNC = "leave_sync"
+"""Action: user clicked "Leave Sync" (prefix-matched with sync_id)."""
+
+CONFIG_LEAVE_SYNC_CONFIRM = "confirm_leave_sync"
+"""Action (block): red confirm button inside the Leave Sync modal.
+
+Not ``leave_sync_confirm``: that string is prefix-matched onto
+``CONFIG_LEAVE_SYNC`` and would misroute to the modal-opening handler."""
 
 CONFIG_PAUSE_SYNC = "pause_sync"
-"""Action: user clicked "Pause Syncing" on an active channel sync (prefix-matched with sync_id)."""
+"""Action: user clicked "Pause Sync" (prefix-matched with sync_id). Opens confirm."""
+
+CONFIG_PAUSE_SYNC_CONFIRM = "confirm_pause_sync"
+"""Action (block): confirm button inside the Pause Sync modal. Not red."""
 
 CONFIG_RESUME_SYNC = "resume_sync"
-"""Action: user clicked "Resume Syncing" on a paused channel sync (prefix-matched with sync_id)."""
+"""Action: user clicked "Resume Sync" (prefix-matched with sync_id). Opens confirm."""
 
-CONFIG_STOP_SYNC = "stop_sync"
-"""Action: user clicked "Stop Syncing" on a channel sync (prefix-matched with sync_id)."""
-
-CONFIG_STOP_SYNC_CONFIRM = "confirm_stop_sync"
-"""Action (block): red confirm button inside the stop-sync modal.
-
-Not ``stop_sync_confirm``: that string is prefix-matched onto
-``CONFIG_STOP_SYNC`` and would misroute to the modal-opening handler."""
-
-CONFIG_SUBSCRIBE_CHANNEL = "subscribe_channel"
-"""Action: user clicked "Subscribe" on a published channel (prefix-matched with sync_id)."""
-
-CONFIG_SUBSCRIBE_CHANNEL_SELECT = "subscribe_channel_select"
-"""Input: channel picker in the subscribe channel modal."""
-
-CONFIG_SUBSCRIBE_CHANNEL_SUBMIT = "subscribe_channel_submit"
-"""Callback: subscribe channel modal submitted."""
-
-CONFIG_SUBSCRIBE_DIRECTION_SUBMIT = "subscribe_direction_submit"
-CONFIG_SUBSCRIBE_REACTION_DIRECTION = "subscribe_reaction_direction"
-CONFIG_SUBSCRIBE_REACTION_STYLE = "subscribe_reaction_style"
+CONFIG_RESUME_SYNC_CONFIRM = "confirm_resume_sync"
+"""Action (block): confirm button inside the Resume Sync modal. Not red."""
 
 # ---------------------------------------------------------------------------
 # Home Tab actions

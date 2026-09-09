@@ -105,7 +105,7 @@ def handle_leave_group(
             orm.ActionsBlock(
                 elements=[
                     orm.ButtonElement(
-                        label="Leave Group",
+                        label=":wave: Leave Group",
                         action=actions.CONFIG_LEAVE_GROUP_CONFIRM,
                         value=str(group_id),
                         style="danger",
@@ -467,7 +467,7 @@ def _disband_denial_message(reason: str, group_name: str, group_id: int, workspa
             "Disbanding destroys the group for everyone, so it takes the agreement of every Owner. "
             "Ask the other Owners to give up ownership first — each Owner can demote itself while "
             "another Owner remains — and then you will be the only Owner and able to disband.\n\n"
-            "_You can always unpublish your own Channels and leave the group instead._"
+            "_You can always Leave Sync on your own Channels and leave the group instead._"
         )
     if reason == "other_publishers":
         publisher_ids = helpers.get_other_publisher_workspace_ids(group_id, workspace_id)
@@ -479,8 +479,8 @@ def _disband_denial_message(reason: str, group_name: str, group_id: int, workspa
         return (
             f':lock: *"{group_name}" still has Channels published by other Workspaces.*\n\n'
             f"{named} would lose work you do not own, so disbanding is blocked. "
-            "Ask them to unpublish their Channels or leave the group first.\n\n"
-            "_You can always unpublish your own Channels and leave the group instead._"
+            "Ask them to Leave Sync on their Channels or leave the group first.\n\n"
+            "_You can always Leave Sync on your own Channels and leave the group instead._"
         )
     return (
         f':lock: *You are not an Owner of "{group_name}", so you cannot disband it.*\n\n'
@@ -581,7 +581,7 @@ def handle_disband_group(
             orm.ActionsBlock(
                 elements=[
                     orm.ButtonElement(
-                        label="Disband Group",
+                        label=":wastebasket: Disband Group",
                         action=actions.CONFIG_DISBAND_GROUP_CONFIRM,
                         value=str(group_id),
                         style="danger",

@@ -2,7 +2,7 @@
 
 A Slack modal's submit button is rendered in the workspace theme colour and
 cannot be styled, so every destructive confirmation (leave group, disband group,
-stop syncing) presents its affirmative action as a ``danger`` (red) button inside
+Leave Sync) presents its affirmative action as a ``danger`` (red) button inside
 the modal body and runs the work as a *block action*. These tests lock in that
 contract and the routing/prefix wiring that makes it reachable.
 """
@@ -24,7 +24,7 @@ from slack import actions  # noqa: E402
 _CONFIRM_ACTIONS = (
     actions.CONFIG_LEAVE_GROUP_CONFIRM,
     actions.CONFIG_DISBAND_GROUP_CONFIRM,
-    actions.CONFIG_STOP_SYNC_CONFIRM,
+    actions.CONFIG_LEAVE_SYNC_CONFIRM,
 )
 
 
@@ -55,13 +55,24 @@ class TestConfirmActionRouting:
             assert resolved == action_id
 
 
-class TestStopSyncConfirmModal:
-    def _view(self):
-        from handlers.channel_sync import handle_stop_sync
+class TestLeaveSyncConfirmModal:
+    def _view(self, *, last_publisher=False):
+        from handlers.channel_sync import handle_leave_sync
 
         client = MagicMock()
-        body = {"actions": [{"action_id": f"{actions.CONFIG_STOP_SYNC}_42"}], "trigger_id": "tr"}
-        handle_stop_sync(body, client, MagicMock(), context={})
+        body = {"actions": [{"action_id": f"{actions.CONFIG_LEAVE_SYNC}_42", "value": "42"}], "trigger_id": "tr"}
+        workspace = SimpleNamespace(id=1, team_id="T1")
+        mine = SimpleNamespace(id=10, workspace_id=1, channel_id="C1", publishes=True)
+        other = SimpleNamespace(id=11, workspace_id=2, channel_id="C2", publishes=not last_publisher)
+        channels = [mine] if last_publisher else [mine, other]
+        with (
+            patch("handlers.channel_sync._get_authorized_workspace", return_value=("U1", workspace)),
+            patch("handlers.channel_sync.DbManager.get_record", return_value=SimpleNamespace(id=42, group_id=5)),
+            patch("handlers.channel_sync.DbManager.find_records", return_value=channels),
+            patch("handlers.channel_sync._group_name", return_value="HQ"),
+            patch("handlers.channel_sync._format_channel_ref", return_value="#c"),
+        ):
+            handle_leave_sync(body, client, MagicMock(), context={})
         return client.views_open.call_args.kwargs["view"]
 
     def test_has_a_red_button_and_no_submit_button(self):
@@ -69,7 +80,33 @@ class TestStopSyncConfirmModal:
         assert "submit" not in view
         buttons = _danger_buttons(view)
         assert len(buttons) == 1
-        assert buttons[0]["action_id"] == actions.CONFIG_STOP_SYNC_CONFIRM
+        assert buttons[0]["action_id"] == actions.CONFIG_LEAVE_SYNC_CONFIRM
+
+    def test_last_publisher_warns_that_the_sync_will_end(self):
+        view = self._view(last_publisher=True)
+        texts = [block.get("text", {}).get("text", "") for block in view.get("blocks", [])]
+        assert any("last publisher" in text for text in texts)
+
+
+class TestPauseSyncConfirmModal:
+    def test_has_a_non_red_button_and_no_submit_button(self):
+        from handlers.channel_sync import handle_pause_sync
+
+        client = MagicMock()
+        body = {"actions": [{"action_id": f"{actions.CONFIG_PAUSE_SYNC}_42", "value": "42"}], "trigger_id": "tr"}
+        handle_pause_sync(body, client, MagicMock(), context={})
+        view = client.views_open.call_args.kwargs["view"]
+        assert "submit" not in view
+        assert _danger_buttons(view) == []
+        buttons = [
+            element
+            for block in view.get("blocks", [])
+            if block.get("type") == "actions"
+            for element in block.get("elements", [])
+            if element.get("type") == "button"
+        ]
+        assert len(buttons) == 1
+        assert buttons[0]["action_id"] == actions.CONFIG_PAUSE_SYNC_CONFIRM
 
 
 class TestLeaveGroupConfirmModal:

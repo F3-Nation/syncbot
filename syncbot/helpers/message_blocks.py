@@ -6,7 +6,7 @@ tail omitted. The full body is in ``blocks``. ``Show more`` is a client chrome
 on those blocks, not a second payload.
 
 Interactive blocks (buttons, pickers) are dropped: they belong to the source
-app and would be dead controls in the destination.
+app and would be dead controls in the target.
 """
 
 from __future__ import annotations
@@ -109,12 +109,12 @@ def content_blocks_for_sync(blocks: list[dict] | None) -> list[dict]:
     return out
 
 
-def trim_dest_blocks(blocks: list[dict] | None, *, limit: int = _SLACK_MAX_BLOCKS) -> list[dict]:
-    """Cap dest Block Kit at Slack's postMessage limit."""
+def trim_target_blocks(blocks: list[dict] | None, *, limit: int = _SLACK_MAX_BLOCKS) -> list[dict]:
+    """Cap target Block Kit at Slack's postMessage limit."""
     items = list(blocks or [])
     if len(items) <= limit:
         return items
-    _logger.warning("dest_blocks_trimmed", extra={"original": len(items), "kept": limit})
+    _logger.warning("target_blocks_trimmed", extra={"original": len(items), "kept": limit})
     return items[:limit]
 
 
@@ -168,7 +168,7 @@ def rewrite_content_blocks(
     map_user_id: Callable[[str], str | None],
     unmapped_user_label: Callable[[str], str],
 ) -> list[dict]:
-    """Rewrite mentions inside copied blocks for the destination workspace."""
+    """Rewrite mentions inside copied blocks for the target workspace."""
     rewritten = [_rewrite_node(copy.deepcopy(b), rewrite_mrkdwn, map_user_id, unmapped_user_label) for b in blocks]
     clamp_section_text_in_blocks(rewritten)
     return rewritten
@@ -274,8 +274,8 @@ def _rich_text_from_mrkdwn_span(mrkdwn: str, *, style: dict | None = None) -> di
     """Turn ``resolve_channel_references`` output into a rich_text element.
 
     Labeled permalinks become ``type: link`` (do not leave mrkdwn ``<url|label>``
-    in a text node). Channel ticks become ``style.code``. Slack web still chips
-    ``archives/C…/p…`` as dest; mobile opens the source URL.
+    in a text node). Channel ticks and unmapped people become ``style.code``. Slack web still chips
+    ``archives/C…/p…`` as the target; mobile opens the source URL.
     """
     s = (mrkdwn or "").strip()
     m = _MRKDWN_LINK.fullmatch(s)
@@ -322,7 +322,10 @@ def _rewrite_node(
             out = dict(node)
             out["user_id"] = mapped
             return out
-        return {"type": "text", "text": unmapped_user_label(node["user_id"])}
+        return _rich_text_from_mrkdwn_span(
+            unmapped_user_label(node["user_id"]),
+            style=node.get("style") if isinstance(node.get("style"), dict) else None,
+        )
     if node.get("type") == "channel" and node.get("channel_id"):
         return _rich_text_from_mrkdwn_span(
             rewrite_mrkdwn(f"<#{node['channel_id']}>"),

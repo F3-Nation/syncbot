@@ -42,7 +42,7 @@ class TestRememberAndTake:
 
     def test_remember_then_take_consume_once(self, echo_db):
         assert inspect(echo_db).has_table("user_action_echoes")
-        fp = reaction_echo_fingerprint("C_DST", "200.0", "thumbsup")
+        fp = reaction_echo_fingerprint("C_TGT", "200.0", "thumbsup")
         remember_user_action("T2", "U_MAPPED", "reaction_added", fp)
         assert take_user_action_echo("T2", "U_MAPPED", "reaction_added", fp) is True
         assert take_user_action_echo("T2", "U_MAPPED", "reaction_added", fp) is False

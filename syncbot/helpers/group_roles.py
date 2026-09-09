@@ -285,8 +285,8 @@ def can_disband(group_id: int, workspace_id: int) -> tuple[bool, str]:
     2. The acting workspace is the group's **only publisher**. Otherwise a
        disband would destroy syncs another workspace authored.
 
-    Condition 2 is deliberately **publisher-based, not direction-based**. A
-    subscriber being receive-only describes its role inside one sync and says
+    Condition 2 is deliberately **publisher-based, not participation-based**. A
+    subscribe-only channel describes its role inside one sync and says
     nothing about whether it published a sync of its own into the same group.
     """
     owners = get_active_owners(group_id)

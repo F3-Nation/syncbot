@@ -32,6 +32,7 @@ from federation.core import (
     validate_webhook_url,
     verify_body,
 )
+from federation.deliver import deliver_remote, federation_image_payloads
 
 __all__ = [
     "FEDERATION_USER_AGENT",
@@ -39,7 +40,9 @@ __all__ = [
     "build_edit_payload",
     "build_message_payload",
     "build_reaction_payload",
+    "deliver_remote",
     "federation_endpoint_url",
+    "federation_image_payloads",
     "federation_sign",
     "federation_verify",
     "generate_federation_code",

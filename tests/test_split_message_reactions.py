@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from slack_sdk.web import WebClient
 
-from handlers.messages import _handle_new_post, _handle_thread_reply
+from handlers.message import _handle_new_post, _handle_thread_reply
 from tests.event_fixtures import make_event_context
 
 
@@ -36,23 +36,32 @@ class TestSplitMessagePostMeta:
 
         with (
             patch(
-                "handlers.messages.helpers.get_sync_list", return_value=[(sc_source, ws_source), (sc_target, ws_target)]
+                "handlers.message.helpers.find_channel_memberships",
+                return_value=[(sc_source, ws_source), (sc_target, ws_target)],
             ),
-            patch("handlers.messages.helpers.get_user_info", return_value=("N", "http://i")),
-            patch("handlers.messages.helpers.get_mapped_target_user_id", return_value=None),
-            patch("handlers.messages.helpers.get_federated_workspace_for_sync", return_value=None),
-            patch("handlers.messages.helpers.decrypt_bot_token", return_value="xoxb-test"),
-            patch("handlers.messages.helpers.apply_mentioned_users", side_effect=lambda t, *a, **k: t),
-            patch("handlers.messages.helpers.resolve_channel_references", side_effect=lambda t, *a, **k: t),
-            patch("handlers.messages.helpers.get_workspace_by_id", return_value=None),
+            patch("handlers.message.helpers.find_origin_sync_channel", return_value=sc_source),
             patch(
-                "handlers.messages.helpers.get_display_name_and_icon_for_synced_message",
+                "handlers.message.helpers.run_sync_pipeline",
+                return_value=[
+                    SimpleNamespace(post_id="child", sync_channel_id=2, ts=200.0),
+                    SimpleNamespace(post_id="child", sync_channel_id=2, ts=300.0),
+                ],
+            ),
+            patch("handlers.message.helpers.get_user_info", return_value=("N", "http://i")),
+            patch("handlers.message.helpers.get_mapped_target_user_id", return_value=None),
+            patch("handlers.message.helpers.get_federated_workspace_for_sync", return_value=None),
+            patch("handlers.message.helpers.decrypt_bot_token", return_value="xoxb-test"),
+            patch("handlers.message.helpers.apply_mentioned_users", side_effect=lambda t, *a, **k: t),
+            patch("handlers.message.helpers.resolve_channel_references", side_effect=lambda t, *a, **k: t),
+            patch("handlers.message.helpers.get_workspace_by_id", return_value=None),
+            patch(
+                "handlers.message.helpers.get_display_name_and_icon_for_synced_message",
                 return_value=("N", None, False, None),
             ),
-            patch("handlers.messages.helpers.post_message", return_value={"ts": "200.000000"}),
-            patch("handlers.messages.helpers.upload_files_to_slack", return_value=(None, "300.000000")),
-            patch("handlers.messages.helpers.cleanup_temp_files"),
-            patch("handlers.messages.DbManager.create_records", side_effect=capture_post_meta),
+            patch("handlers.message.helpers.post_message", return_value={"ts": "200.000000"}),
+            patch("handlers.message.helpers.upload_files_to_slack", return_value=(None, "300.000000")),
+            patch("handlers.message.helpers.cleanup_temp_files"),
+            patch("handlers.message.DbManager.create_records", side_effect=capture_post_meta),
         ):
             _handle_new_post(body, client, logger, ctx, [], direct_files)
 
@@ -88,22 +97,34 @@ class TestSplitMessagePostMeta:
         created: list = []
 
         with (
-            patch("handlers.messages.helpers.get_post_records", return_value=post_records),
-            patch("handlers.messages.helpers.get_user_info", return_value=("N", "http://i")),
-            patch("handlers.messages.helpers.get_mapped_target_user_id", return_value=None),
-            patch("handlers.messages.helpers.get_federated_workspace_for_sync", return_value=None),
-            patch("handlers.messages.helpers.decrypt_bot_token", return_value="xoxb-test"),
-            patch("handlers.messages.helpers.apply_mentioned_users", side_effect=lambda t, *a, **k: t),
-            patch("handlers.messages.helpers.resolve_channel_references", side_effect=lambda t, *a, **k: t),
-            patch("handlers.messages.helpers.get_workspace_by_id", return_value=None),
+            patch("handlers.message.helpers.get_post_records", return_value=post_records),
             patch(
-                "handlers.messages.helpers.get_display_name_and_icon_for_synced_message",
+                "handlers.message.helpers.find_channel_memberships",
+                return_value=[(sc_source, ws_source)],
+            ),
+            patch("handlers.message.helpers.find_origin_sync_channel", return_value=sc_source),
+            patch(
+                "handlers.message.helpers.run_sync_pipeline",
+                return_value=[
+                    SimpleNamespace(post_id="child", sync_channel_id=22, ts=250.0),
+                    SimpleNamespace(post_id="child", sync_channel_id=22, ts=350.0),
+                ],
+            ),
+            patch("handlers.message.helpers.get_user_info", return_value=("N", "http://i")),
+            patch("handlers.message.helpers.get_mapped_target_user_id", return_value=None),
+            patch("handlers.message.helpers.get_federated_workspace_for_sync", return_value=None),
+            patch("handlers.message.helpers.decrypt_bot_token", return_value="xoxb-test"),
+            patch("handlers.message.helpers.apply_mentioned_users", side_effect=lambda t, *a, **k: t),
+            patch("handlers.message.helpers.resolve_channel_references", side_effect=lambda t, *a, **k: t),
+            patch("handlers.message.helpers.get_workspace_by_id", return_value=None),
+            patch(
+                "handlers.message.helpers.get_display_name_and_icon_for_synced_message",
                 return_value=("N", None, False, None),
             ),
-            patch("handlers.messages.helpers.post_message", return_value={"ts": "250.000000"}),
-            patch("handlers.messages.helpers.upload_files_to_slack", return_value=(None, "350.000000")),
-            patch("handlers.messages.helpers.cleanup_temp_files"),
-            patch("handlers.messages.DbManager.create_records", side_effect=lambda rows: created.extend(rows)),
+            patch("handlers.message.helpers.post_message", return_value={"ts": "250.000000"}),
+            patch("handlers.message.helpers.upload_files_to_slack", return_value=(None, "350.000000")),
+            patch("handlers.message.helpers.cleanup_temp_files"),
+            patch("handlers.message.DbManager.create_records", side_effect=lambda rows: created.extend(rows)),
         ):
             _handle_thread_reply(body, client, logger, ctx, [], direct_files)
 
@@ -140,30 +161,43 @@ class TestFileOnlyThreadPostMeta:
         created: list = []
 
         with (
-            patch("handlers.messages.helpers.get_post_records", return_value=post_records),
-            patch("handlers.messages.helpers.get_user_info", return_value=("N", "http://i")),
-            patch("handlers.messages.helpers.get_federated_workspace_for_sync", return_value=None),
-            patch("handlers.messages.helpers.decrypt_bot_token", return_value="xoxb-test"),
-            patch("handlers.messages.helpers.apply_mentioned_users", side_effect=lambda t, *a, **k: t),
-            patch("handlers.messages.helpers.resolve_channel_references", side_effect=lambda t, *a, **k: t),
-            patch("handlers.messages.helpers.get_workspace_by_id", return_value=None),
+            patch("handlers.message.helpers.get_post_records", return_value=post_records),
             patch(
-                "handlers.messages.helpers.get_display_name_and_icon_for_synced_message",
+                "handlers.message.helpers.find_channel_memberships",
+                return_value=[(sc_source, ws_source)],
+            ),
+            patch("handlers.message.helpers.find_origin_sync_channel", return_value=sc_source),
+            patch(
+                "handlers.message.helpers.run_sync_pipeline",
+                return_value=[SimpleNamespace(post_id="child", sync_channel_id=22, ts=350.0)],
+            ) as pipeline,
+            patch("handlers.message.helpers.get_user_info", return_value=("N", "http://i")),
+            patch("handlers.message.helpers.get_federated_workspace_for_sync", return_value=None),
+            patch("handlers.message.helpers.decrypt_bot_token", return_value="xoxb-test"),
+            patch("handlers.message.helpers.apply_mentioned_users", side_effect=lambda t, *a, **k: t),
+            patch("handlers.message.helpers.resolve_channel_references", side_effect=lambda t, *a, **k: t),
+            patch("handlers.message.helpers.get_workspace_by_id", return_value=None),
+            patch(
+                "handlers.message.helpers.get_display_name_and_icon_for_synced_message",
                 return_value=("N", None, False, None),
             ),
-            patch("handlers.messages.helpers.post_message") as post_msg,
+            patch("handlers.message.helpers.post_message") as post_msg,
             patch(
-                "handlers.messages.helpers.upload_files_to_slack",
+                "handlers.message.helpers.upload_files_to_slack",
                 return_value=(None, "350.000000"),
-            ) as upload,
-            patch("handlers.messages.helpers.cleanup_temp_files"),
-            patch("handlers.messages.DbManager.create_records", side_effect=lambda rows: created.extend(rows)),
+            ),
+            patch("handlers.message.helpers.cleanup_temp_files"),
+            patch("handlers.message.DbManager.create_records", side_effect=lambda rows: created.extend(rows)),
         ):
             _handle_thread_reply(body, client, logger, ctx, [], direct_files)
 
         post_msg.assert_not_called()
-        assert upload.call_args.kwargs["thread_ts"] == "20.000000"
-        assert upload.call_args.kwargs["initial_comment"] == "`N (A)` shared a file"
+        envelope = pipeline.call_args.args[0]
+        assert envelope["thread_post_id"] == "parent"
+        assert envelope["source_sync_channel_id"] == 11
+        assert envelope["people"][0]["user_id"] == "U1"
+        assert pipeline.call_args.kwargs["thread_parent_ts_by_channel"]["C_TGT"] == "20.000000"
+        assert pipeline.call_args.args[0]["file_refs"] == direct_files
         assert len(created) == 2
         target_rows = [m for m in created if m.sync_channel_id == 22]
         assert len(target_rows) == 1

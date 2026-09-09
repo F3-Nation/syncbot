@@ -15,7 +15,8 @@ as a `danger` (red) **button inside the modal body**, run the work as a *block
 action*, and then close the modal by replacing the view.
 
 Reference implementation: the DB-reset modal (`handlers/sync.py`) and the leave/
-disband/stop-sync confirmations (`handlers/group_manage.py`, `handlers/channel_sync.py`).
+disband/leave-sync confirmations (`handlers/group_manage.py`, `handlers/channel_sync.py`).
+Pause Sync and Resume Sync use the same in-modal confirm pattern but are **not** red.
 
 Do:
 
@@ -38,9 +39,13 @@ Watch the prefix matcher: `helpers.core._PREFIXED_ACTIONS` folds any `action_id`
 that starts with a trigger prefix (e.g. `leave_group`) back onto that trigger.
 A confirm action must **not** share that prefix — name it `confirm_leave_group`,
 not `leave_group_confirm`, or it will misroute to the modal-opening handler.
+Picker `action_id`s have the same rule: `join_sync` is prefixed, so the Join Sync
+channel picker is `select_join_sync`, not `join_sync_select`. `create_sync` is
+not prefixed, so `create_sync_select` is safe.
 
-Don't add a parallel "legacy" view-submission route alongside the block action;
-convert the existing route in place.
+Don't add a parallel leftover view-submission route alongside the block action;
+convert the existing route in place. Do not keep leftover Slack IDs after a
+rename. Refresh rebuilds Home; stale buttons may `no_handler` until then.
 
 ## Single-purpose modals get exactly one button
 
