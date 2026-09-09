@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- version list -->
 
 
+## [1.5.4] - 2026-09-09
+
+### Fixed
+
+- Keep changelog tests aligned with shortened 1.2.0-length notes (#43)
+
+
+
 ## [1.5.3] - 2026-09-05
 
 ### Changed

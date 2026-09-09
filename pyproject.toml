@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "syncbot"
-version = "1.5.3"
+version = "1.5.4"
 description = "Sync chat threads between Slack Workspaces."
 authors = ["Evan Petzoldt <evan.petzoldt@protonmail.com>", "Klint Van Tassel <developer@sprocktech.com>"]
 readme = "README.md"
