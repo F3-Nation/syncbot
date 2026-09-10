@@ -1,0 +1,70 @@
+# Deploy SyncBot to GCP Cloud Run — F3 Nation (SQLite + Litestream)
+#
+# Triggers on push to nation-staging or nation-prod.
+# Uses the Nation-specific Dockerfile at infra/gcp-nation/Dockerfile.
+#
+# Required GitHub variables:
+#   GCP_PROJECT_ID
+#   GCP_REGION                        (e.g. us-central1)
+#   GCP_WORKLOAD_IDENTITY_PROVIDER    (projects/NUM/locations/global/workloadIdentityPools/...)
+#   GCP_SERVICE_ACCOUNT               (deploy SA email)
+#
+# Required GitHub secrets:
+#   (none — Slack secrets are in GCP Secret Manager, not GitHub)
+
+name: Deploy Nation (GCP)
+
+on:
+  push:
+    branches:
+      - nation-staging
+      - nation-prod
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  DOCKER_CONTEXT: .
+  DOCKERFILE: infra/gcp-nation/Dockerfile
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive stage from branch
+        id: stage
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/nation-staging" ]]; then
+            echo "stage=staging" >> "$GITHUB_OUTPUT"
+          else
+            echo "stage=prod" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${{ vars.GCP_REGION }}-docker.pkg.dev" --quiet
+
+      - name: Build and push container image
+        run: |
+          IMAGE="${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/syncbot-${{ steps.stage.outputs.stage }}-images/syncbot:${{ github.sha }}"
+          docker build -f "$DOCKERFILE" -t "$IMAGE" "$DOCKER_CONTEXT"
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run services update "syncbot-${{ steps.stage.outputs.stage }}" \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --image "$IMAGE"

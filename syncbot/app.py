@@ -86,6 +86,7 @@ def _redact_sensitive(obj, _depth=0):
         return obj
     if isinstance(obj, dict):
         return {k: "[REDACTED]" if k in _SENSITIVE_KEYS else _redact_sensitive(v, _depth + 1) for k, v in obj.items()}
+        return {k: "[REDACTED]" if k in _SENSITIVE_KEYS else _redact_sensitive(v, _depth + 1) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_redact_sensitive(v, _depth + 1) for v in obj]
     return obj
@@ -355,6 +356,7 @@ def main_response(body: dict, logger, client, ack, context: dict) -> None:
             raise
     else:
         if not (request_type == "view_submission" and request_id in VIEW_ACK_MAPPER and request_id not in VIEW_MAPPER):
+        if not (request_type == "view_submission" and request_id in VIEW_ACK_MAPPER and request_id not in VIEW_MAPPER):
             _logger.error(
                 "no_handler",
                 extra={
@@ -513,6 +515,7 @@ def run_syncbot_http_server(
                 content_len = 0
             body_str = self.rfile.read(content_len).decode() if content_len else ""
             headers = {k: v for k, v in self.headers.items()}
+            status, resp = dispatch_federation_request(method, self._path_no_query(), body_str, headers)
             status, resp = dispatch_federation_request(method, self._path_no_query(), body_str, headers)
             self._send_raw(
                 status,

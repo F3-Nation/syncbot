@@ -4,8 +4,8 @@ This guide is for **workspace admins and people using SyncBot in Slack**. If you
 
 ## Getting Started
 
-1. Click the install link from a desktop browser (make sure you have selected the correct workspace in the upper right).
-2. Open the **SyncBot** app from the sidebar and click the **Home** tab. Everyone can open it. Workspace admins and owners configure Settings; they can also name extra managers who may create groups, Create Sync, and Join Sync without opening Settings.
+1. From a desktop browser click [this link](https://syncbot-prod-827676898321.us-central1.run.app/slack/install) (then make sure you've selected the correct workspace in the upper right)
+2. Open the **SyncBot** app from the sidebar and click the **Home** tab (requires workspace admin or owner)
 3. The Home tab shows everything in one view:
    - **Authorize SyncBot** — at the top, when this person still needs to grant user permissions. See **Authorize SyncBot** below.
    - **SyncBot Configuration** — directly under that. **Refresh** is for everyone, so you can reload Home after revoking your authorization. **Settings** is for Slack admins on every installed workspace: extra managers and whether private Channels may be published here. Federation, retention, and the broadcast allow-list stay on the primary workspace (`PRIMARY_WORKSPACE` set and redeployed). **Backup/Restore** is also primary-only. If you do not see those instance options, ask the operator.
