@@ -15,15 +15,13 @@ output "project_id" {
   value       = var.project_id
 }
 
-# Deploy contract: artifact_bucket equivalent (registry for container images)
 output "artifact_registry_repository" {
   description = "Artifact Registry repository for container images (CI pushes here)"
   value       = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.syncbot.repository_id}"
 }
 
-# Deploy contract: deploy_role equivalent (for Workload Identity Federation)
 output "deploy_service_account_email" {
-  description = "Service account email for CI/deploy (use with WIF)"
+  description = "Service account email for CI/deploy (use with Workload Identity Federation)"
   value       = google_service_account.deploy.email
 }
 
@@ -37,13 +35,22 @@ output "cloud_run_service_location" {
   value       = google_cloud_run_v2_service.syncbot.location
 }
 
-# Optional: DB connection info when Cloud SQL is created
-output "database_connection_name" {
-  description = "Cloud SQL connection name (when not using existing DB)"
-  value       = var.use_existing_database ? null : (length(google_sql_database_instance.main) > 0 ? google_sql_database_instance.main[0].connection_name : null)
+output "litestream_bucket" {
+  description = "GCS bucket for Litestream replicas (empty when database_backend is mysql or postgresql)"
+  value       = local.is_sqlite ? google_storage_bucket.litestream[0].name : ""
 }
 
-output "token_encryption_secret_name" {
-  description = "Secret Manager secret name containing TOKEN_ENCRYPTION_KEY"
-  value       = google_secret_manager_secret.app_secrets[var.secret_token_encryption_key].name
+output "workload_identity_provider" {
+  description = "WIF provider resource name for GitHub Actions (empty if github_repo unset)"
+  value       = var.github_repo != "" ? google_iam_workload_identity_pool_provider.github[0].name : ""
+}
+
+output "database_mode" {
+  description = "sqlite or existing (alias of database_backend; remove in 2.0.0)"
+  value       = local.is_sqlite ? "sqlite" : "existing"
+}
+
+output "database_backend" {
+  description = "mysql, postgresql, or sqlite"
+  value       = local.resolved_database_backend
 }

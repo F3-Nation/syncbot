@@ -35,8 +35,7 @@ services:
       # Slack — replace with your values or use a .env file
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-xoxb-your-bot-token}
       # Optional
-      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-123}
-      REQUIRE_ADMIN: ${REQUIRE_ADMIN:-true}
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:-${TOKEN_ENCRYPTION_KEY:-123}}
     volumes:
       - ./syncbot:/app/syncbot
 

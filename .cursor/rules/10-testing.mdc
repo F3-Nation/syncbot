@@ -1,0 +1,12 @@
+---
+description: Pytest layout and expectations for SyncBot
+globs: **/*.py
+alwaysApply: false
+---
+
+# Testing
+
+- Tests live in `tests/` for application behavior and `infra/*/tests/` for infra scripts/helpers used in CI.
+- Prefer focused tests with explicit fixtures; avoid requiring real Slack credentials — mock Bolt/API boundaries where practical.
+- Match CI when relevant: `poetry run pytest -q tests/ infra/aws/tests infra/gcp/tests`.
+- When fixing a bug, add or extend a test that would fail without the fix.

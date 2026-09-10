@@ -1,0 +1,13 @@
+---
+description: Helpers import submodules only (no package circular import)
+globs: syncbot/helpers/**
+alwaysApply: false
+---
+
+# Helpers imports
+
+Inside `helpers/*.py`, import **submodules** only (`from helpers._cache import …`, `from db import …`, `from helpers.settings import …`).
+
+Never `import helpers` or `from helpers import …` from a helper submodule. `helpers/__init__.py` re-exports many modules and would circular-import at Lambda cold start. See the note in `syncbot/helpers/sync_cleanup.py`.
+
+Callers outside the package still use `import helpers` / `helpers.X` as usual.

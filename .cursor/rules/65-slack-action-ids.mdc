@@ -1,0 +1,13 @@
+---
+description: Rename Slack action IDs cleanly; never keep leftover routes
+globs: "**/routing.py,**/actions.py,**/handlers/**,**/builders/**,**/deferred_ack_views.py"
+alwaysApply: false
+---
+
+# Slack action ID renames
+
+When you rename a Home button, modal submit, or confirm control, rename the Slack `action_id` / `callback_id`, the Python constant in `syncbot/slack/actions.py`, the handler, and the `routing.py` mapper entry together.
+
+Do **not** leave the old Slack ID in `ACTION_MAPPER`, `VIEW_MAPPER`, `VIEW_ACK_MAPPER`, or `_PREFIXED_ACTIONS` as an alias. Stale Home or an open modal may `no_handler` until the user taps Refresh; that is expected. This app is low traffic and deploys are infrequent.
+
+Confirm ids still must not share a trigger prefix (`confirm_leave_sync`, not `leave_sync_confirm`). Picker `action_id`s have the same rule: `join_sync` is prefixed, so the Join Sync picker is `select_join_sync`, not `join_sync_select`. See `.cursor/rules/60-slack-confirmations.mdc`.

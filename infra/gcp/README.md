@@ -1,82 +1,74 @@
 # SyncBot on GCP (Terraform)
 
-Minimal Terraform scaffold to run SyncBot on Google Cloud. Satisfies the [infrastructure contract](../../docs/INFRA_CONTRACT.md): Cloud Run (public HTTPS), Secret Manager, optional Cloud SQL, and optional Cloud Scheduler keep-warm.
+This module runs SyncBot on Cloud Run. **SQLite + Litestream to GCS** is the default and stays cheap at low usage. You can instead point at **MySQL, PostgreSQL, or TiDB Cloud**. **Cloud SQL is not created.** Secrets are Terraform variables injected as Cloud Run env.
+
+GitHub Actions never runs `terraform apply`. Keep `infra/gcp/terraform.tfstate` (local by default). A remote GCS backend is optional later.
+
+First-time install is the root [README](../../README.md). AWS vs GCP database defaults, GitHub image-only CI, and the one-state-file trap are in [DEPLOY.md](../../docs/DEPLOY.md).
+
+## Free default vs paid warmth
+
+`GCP_CLOUD_RUN_MIN_INSTANCES=0` is the **free default** (scale to zero; idle is not billed when `cpu_idle=true`). Combined with keep-warm (`GET /health` every 5 minutes, on by default, free), the instance usually stays in Cloud Run’s idle window.
+
+- On a cold start, Slack **events** (messages, reactions) are **queued by Cloud Run and/or retried by Slack**, so sync still happens — sometimes a few seconds later. Message and reaction handlers are idempotent on Slack envelope `event_id`, so retries recover a failed first delivery without double-posting. Interactivity (buttons, modals, slash commands) may need a second click until the instance is warm.
+- **If you need always-on 3s Slack interactivity** (for example in production), set `GCP_CLOUD_RUN_MIN_INSTANCES=1` (paid always-on). That is the only default-adjacent knob that costs money; everything else is designed to stay in always-free quotas at low usage.
+- Keep `cpu_idle=true` (request-based billing). If you turn CPU always-on, keep-warm pings become about as expensive as `min_instances=1`.
+- Litestream streams WAL while CPU is allocated (during a request or a keep-warm ping). A small RPO after the HTTP response is accepted for the free default. SIGTERM on the entrypoint flushes the replicator.
+
+## Upgrading from Cloud SQL
+
+If you previously applied this module with Cloud SQL (`db-f1-micro`), `terraform apply` **destroys** that instance. Dump or backup first. There is no in-place migrate to SQLite in this tree — Litestream is a new database. Forks that did apply Cloud SQL must backup before upgrading.
 
 ## Prerequisites
 
-- [Terraform](https://www.terraform.io/downloads) >= 1.0
-- [gcloud](https://cloud.google.com/sdk/docs/install) CLI, authenticated
+- [Terraform](https://www.terraform.io/downloads) 1.0 or newer
+- The [gcloud](https://cloud.google.com/sdk/docs/install) CLI, with `gcloud auth login` and Application Default Credentials
 - A GCP project with billing enabled
+- Docker (for local image builds and CI)
 
-## Quick start
+## First time and GitHub
 
-1. **Enable APIs and create secrets (one-time)**  
-   Terraform will enable required APIs. Create Secret Manager secrets and set their values (or let Terraform create placeholder secrets and add versions manually):
+Do not apply production variables over a test state file. Build the container from the **repository root** (not `infra/gcp/`):
 
-   ```bash
-   cd infra/gcp
-   terraform init
-   terraform plan -var="project_id=YOUR_PROJECT_ID" -var="stage=test"
-   terraform apply -var="project_id=YOUR_PROJECT_ID" -var="stage=test"
-   ```
+```bash
+docker build -f infra/gcp/Dockerfile --platform linux/amd64 .
+```
 
-2. **Set secret values**  
-   After the first apply, add secret versions for Slack and DB (if using existing DB). Use the secret IDs shown in Terraform (e.g. `syncbot-test-syncbot-slack-signing-secret`):
+## Database backends
 
-   ```bash
-   echo -n "YOUR_SLACK_SIGNING_SECRET" | gcloud secrets versions add syncbot-test-syncbot-slack-signing-secret --data-file=-
-   # Repeat for SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_BOT_SCOPES (comma-separated list must match oauth_config.scopes.bot / BOT_SCOPES), syncbot-db-password (if existing DB)
-   ```
+Do not infer the backend from `DATABASE_HOST`. Stage is only `test` or `prod`.
 
-   `TOKEN_ENCRYPTION_KEY` is generated once automatically by Terraform and stored in Secret Manager. Back it up. If lost, existing workspaces must reinstall to re-authorize bot tokens.
-   For disaster recovery, restore with `-var='token_encryption_key_override=<old_key>'`.
-
-3. **Set the Cloud Run image**  
-   By default the service uses a placeholder image. Build and push your SyncBot image to Artifact Registry, then:
-
-   ```bash
-   terraform apply -var="project_id=YOUR_PROJECT_ID" -var="stage=test" \
-     -var='cloud_run_image=REGION-docker.pkg.dev/PROJECT/syncbot-test-images/syncbot:latest'
-   ```
+| `database_backend` / `DATABASE_BACKEND` | Runtime | Notes |
+| --- | --- | --- |
+| `sqlite` (default) | `DATABASE_BACKEND=sqlite`, `DATABASE_URL=sqlite:////data/syncbot.db`, Litestream → GCS | `max_instances=1`, concurrency 1. No `DATABASE_PASSWORD`. |
+| `mysql` / `postgresql` | Host, user, password, schema | Same SQL-host contract as AWS (port 4000, full username including any TiDB prefix). No GCS bucket. Cloud Run may scale above 1 instance. |
 
 ## Variables (summary)
 
 | Variable | Description |
 |----------|-------------|
 | `project_id` | GCP project ID (required) |
-| `region` | Region for Cloud Run and optional Cloud SQL (default `us-central1`) |
-| `stage` | Stage name, e.g. `test` or `prod` |
-| `use_existing_database` | If `true`, use `existing_db_*` vars instead of creating Cloud SQL |
-| `existing_db_host`, `existing_db_schema`, `existing_db_user` | Existing MySQL connection (when `use_existing_database = true`) |
-| `cloud_run_image` | Container image URL for Cloud Run (set after first build) |
-| `secret_slack_bot_scopes` | Secret Manager secret ID for **bot** OAuth scopes (runtime `SLACK_BOT_SCOPES`; default `syncbot-slack-scopes`). The **secret value** must match `oauth_config.scopes.bot` / `BOT_SCOPES` (same requirement as AWS SAM `SlackOauthBotScopes`). |
-| `slack_user_scopes` | Plain-text **user** OAuth scopes for Cloud Run (`SLACK_USER_SCOPES`). Default matches repo standard (same comma-separated string as AWS SAM `SlackOauthUserScopes`); must match manifest `oauth_config.scopes.user` and `USER_SCOPES` in `slack_manifest_scopes.py`. |
-| `log_level` | Python logging level for the app (`LOG_LEVEL`): `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` (default `INFO`). |
-| `enable_keep_warm` | Create Cloud Scheduler job to ping the service (default `true`) |
+| `region` | Region. Terraform default if omitted is `us-central1` — do not copy that into a command unless it is your choice |
+| `stage` | `test` or `prod` |
+| `database_backend` | `sqlite` (default), `mysql`, or `postgresql` |
+| `cloud_run_image` | Bootstrap default `gcr.io/cloudrun/hello`; CI replaces it |
+| `cloud_run_min_instances` | `0` (default, free) or `1` (paid) |
+| `enable_keep_warm` | Cloud Scheduler `/health` (default `true`) |
+| `github_repo` | `YOUR_GITHUB_OWNER/YOUR_REPO` for WIF; empty skips WIF |
+| `slack_*` / `data_encryption_key` | App secrets (sensitive TF vars) |
+| `database_host` / `database_user` / `database_password` | Required when `database_backend` is `mysql` or `postgresql` |
+| `database_port` | Optional. Empty uses 3306 for MySQL and 5432 for PostgreSQL. |
 
-See [variables.tf](variables.tf) for all options.
+See [variables.tf](variables.tf) and [example.tfvars](example.tfvars). In the deploy env file the names are `GCP_CLOUD_RUN_IMAGE`, `GCP_CLOUD_RUN_MIN_INSTANCES`, and `ENABLE_KEEP_WARM` (unprefixed; that last name is also used on AWS EventBridge).
 
-## Outputs (deploy contract)
+## Outputs
 
-After `terraform apply`, outputs align with [docs/INFRA_CONTRACT.md](../../docs/INFRA_CONTRACT.md):
-
-- **service_url** — Public base URL (for Slack app configuration)
-- **region** — Primary region
-- **project_id** — GCP project ID
-- **artifact_registry_repository** — Image registry URL (CI pushes here)
-- **deploy_service_account_email** — Service account for CI (use with Workload Identity Federation)
-
-Use the [GCP bootstrap output script](scripts/print-bootstrap-outputs.sh) to print these as GitHub variable suggestions.
-
-## Keep-warm
-
-If `enable_keep_warm` is `true`, a Cloud Scheduler job pings the service at `/health` on the configured interval. The app implements `GET /health` (JSON `{"status":"ok"}`).
+After `terraform apply`, [print-bootstrap-outputs.sh](scripts/print-bootstrap-outputs.sh) prints GitHub variable suggestions, including `GCP_WORKLOAD_IDENTITY_PROVIDER`.
 
 ## HTTP port
 
-Cloud Run sets the `PORT` environment variable (default `8080`). The container entrypoint (`python app.py`) listens on `PORT`, falling back to `3000` when unset (local Docker).
+Cloud Run sets `PORT` (typically `8080`). The container entrypoint listens on `PORT`.
 
 ## Security
 
-- The Cloud Run service is publicly invokable so Slack can reach it. For production, consider Cloud Armor or IAP.
-- Deploy uses a dedicated service account; prefer [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation) for GitHub Actions instead of long-lived keys.
+The Cloud Run service is publicly invokable so Slack can reach it. Prefer WIF for GitHub Actions instead of long-lived keys. `github_repo` must match the repository that will push to `test` and `prod`.

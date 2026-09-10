@@ -1,0 +1,8 @@
+# SAM `validate --lint` treats cfn-lint warnings as failure.
+# These ignores remain for SAM CLI / cfn-lint combinations that still emit
+# W1030/W1033/W3691. The app template does not create a VPC or RDS.
+# Template Metadata ignore_checks is not applied reliably by current SAM CLI.
+ignore_checks:
+  - W1030
+  - W1033
+  - W3691

@@ -52,12 +52,42 @@ def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
     connectable = get_engine()
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-        )
-        with context.begin_transaction():
-            context.run_migrations()
+        # SQLite column drops need a table rebuild (CREATE, copy, DROP, RENAME),
+        # and DROP TABLE trips foreign key enforcement from referencing tables
+        # even though the table comes straight back. The MySQL equivalent is
+        # SET FOREIGN_KEY_CHECKS = 0, which db._drop_all_tables_dialect_aware
+        # already relies on. `PRAGMA foreign_keys` is ignored inside a
+        # transaction, so it has to be set here rather than in a migration.
+        # Driven through the raw DBAPI cursor on purpose: going through the
+        # SQLAlchemy connection would open a transaction here, and Alembic's own
+        # commit would then nest inside it and be rolled back at close, losing
+        # the alembic_version stamp.
+        is_sqlite = connection.dialect.name == "sqlite"
+        had_foreign_keys = _set_sqlite_foreign_keys(connection, False) if is_sqlite else False
+
+        try:
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+            )
+            with context.begin_transaction():
+                context.run_migrations()
+        finally:
+            if is_sqlite and had_foreign_keys:
+                _set_sqlite_foreign_keys(connection, True)
+
+
+def _set_sqlite_foreign_keys(connection, enabled: bool) -> bool:
+    """Set ``PRAGMA foreign_keys`` and return whether it was previously on."""
+    cursor = connection.connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys")
+        row = cursor.fetchone()
+        was_enabled = bool(row[0]) if row else False
+        cursor.execute(f"PRAGMA foreign_keys={'ON' if enabled else 'OFF'}")
+        return was_enabled
+    finally:
+        cursor.close()
 
 
 if context.is_offline_mode():

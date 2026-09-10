@@ -14,6 +14,17 @@ Parameters:
     Description: >
       GitHub repository in form owner/repo (e.g. myorg/syncbot).
       Used to scope OIDC trust so only this repo can assume the deploy role.
+  GitHubImmutableRepository:
+    Type: String
+    Default: ""
+    Description: >
+      Optional second form of the same repository, owner@owner-id/repo@repo-id
+      (e.g. myorg@12345678/syncbot@9876543210). GitHub issues this immutable
+      subject claim instead of owner/repo for repositories created or transferred
+      after 2026-07-15, and the plain owner/repo pattern never matches those
+      tokens. ensure_bootstrap.sh fills this in automatically; to read it yourself
+      run: gh api repos/OWNER/REPO/actions/oidc/customization/sub --jq .sub_claim_prefix
+      and drop the leading "repo:". Leave empty to trust only owner/repo.
   CreateOIDCProvider:
     Type: String
     Default: "true"
@@ -29,9 +40,16 @@ Parameters:
     Description: >
       Prefix for the deployment artifact bucket. The bucket resource name is
       DeploymentBucketPrefix + account ID + region (see DeploymentBucket in Resources).
+  TemplateContentSha256:
+    Type: String
+    Default: ""
+    Description: >
+      sha256 of infra/aws/template.bootstrap.yaml. Set by ensure_bootstrap.sh so
+      later deploys skip CloudFormation when the file is unchanged. Do not set by hand.
 
 Conditions:
   CreateOIDC: !Equals [!Ref CreateOIDCProvider, "true"]
+  HasImmutableRepository: !Not [!Equals [!Ref GitHubImmutableRepository, ""]]
 
 Resources:
   # -------------------------------------------------------------------------
@@ -88,7 +106,11 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepository}:*"
+                token.actions.githubusercontent.com:sub: !If
+                  - HasImmutableRepository
+                  - - !Sub "repo:${GitHubRepository}:*"
+                    - !Sub "repo:${GitHubImmutableRepository}:*"
+                  - !Sub "repo:${GitHubRepository}:*"
       ManagedPolicyArns:
         - !Ref DeployPolicy
 
@@ -164,12 +186,19 @@ Resources:
               - lambda:AddPermission
               - lambda:RemovePermission
               - lambda:PublishVersion
+              - lambda:InvokeFunction
+              - lambda:PutFunctionConcurrency
+              - lambda:DeleteFunctionConcurrency
+              - lambda:GetFunctionConcurrency
             Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:syncbot-*"
-          - Sid: ApiGateway
+          - Sid: LambdaFunctionUrl
             Effect: Allow
             Action:
-              - apigateway:*
-            Resource: "*"
+              - lambda:CreateFunctionUrlConfig
+              - lambda:UpdateFunctionUrlConfig
+              - lambda:DeleteFunctionUrlConfig
+              - lambda:GetFunctionUrlConfig
+            Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:syncbot-*"
           - Sid: Logs
             Effect: Allow
             Action:
@@ -178,53 +207,32 @@ Resources:
               - logs:DescribeLogGroups
               - logs:DeleteLogGroup
             Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/syncbot-*"
-          - Sid: EC2Networking
+          - Sid: LitestreamReplicaBucket
             Effect: Allow
             Action:
-              - ec2:CreateVpc
-              - ec2:DeleteVpc
-              - ec2:DescribeVpcs
-              - ec2:CreateSubnet
-              - ec2:DeleteSubnet
-              - ec2:DescribeSubnets
-              - ec2:CreateInternetGateway
-              - ec2:DeleteInternetGateway
-              - ec2:AttachInternetGateway
-              - ec2:DetachInternetGateway
-              - ec2:CreateRouteTable
-              - ec2:DeleteRouteTable
-              - ec2:CreateRoute
-              - ec2:DeleteRoute
-              - ec2:AssociateRouteTable
-              - ec2:DisassociateRouteTable
-              - ec2:CreateSecurityGroup
-              - ec2:DeleteSecurityGroup
-              - ec2:DescribeSecurityGroups
-              - ec2:DescribeRouteTables
-              - ec2:DescribeInternetGateways
-              - ec2:DescribeVpcAttribute
-              - ec2:ModifyVpcAttribute
-              - ec2:CreateTags
-              - ec2:DeleteTags
-              - ec2:DescribeTags
-            Resource: "*"
-          - Sid: RDS
-            Effect: Allow
-            Action:
-              - rds:CreateDBInstance
-              - rds:DeleteDBInstance
-              - rds:ModifyDBInstance
-              - rds:DescribeDBInstances
-              - rds:CreateDBSubnetGroup
-              - rds:DeleteDBSubnetGroup
-              - rds:DescribeDBSubnetGroups
-              - rds:CreateDBParameterGroup
-              - rds:DeleteDBParameterGroup
-              - rds:DescribeDBParameters
-              - rds:AddTagsToResource
-              - rds:RemoveTagsFromResource
-              - rds:ListTagsForResource
-            Resource: "*"
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:GetBucketLocation
+              - s3:GetBucketPolicy
+              - s3:PutBucketPolicy
+              - s3:DeleteBucketPolicy
+              - s3:GetBucketVersioning
+              - s3:PutBucketVersioning
+              - s3:GetLifecycleConfiguration
+              - s3:PutLifecycleConfiguration
+              - s3:GetBucketPublicAccessBlock
+              - s3:PutBucketPublicAccessBlock
+              - s3:GetEncryptionConfiguration
+              - s3:PutEncryptionConfiguration
+              - s3:GetBucketTagging
+              - s3:PutBucketTagging
+              - s3:ListBucket
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource:
+              - "arn:aws:s3:::syncbot-*-litestream-*"
+              - "arn:aws:s3:::syncbot-*-litestream-*/*"
           - Sid: CloudWatchAlarms
             Effect: Allow
             Action:
@@ -242,18 +250,29 @@ Resources:
               - events:DescribeRule
               - events:ListTargetsByRule
             Resource: "*"
-          - Sid: SecretsManagerSyncBot
+          - Sid: Scheduler
             Effect: Allow
             Action:
-              - secretsmanager:GetSecretValue
-              - secretsmanager:DescribeSecret
-              - secretsmanager:CreateSecret
-              - secretsmanager:UpdateSecret
-              - secretsmanager:DeleteSecret
-              - secretsmanager:TagResource
-              - secretsmanager:UntagResource
-              - secretsmanager:ListSecretVersionIds
-            Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:syncbot-*"
+              - scheduler:CreateSchedule
+              - scheduler:UpdateSchedule
+              - scheduler:DeleteSchedule
+              - scheduler:GetSchedule
+              - scheduler:ListSchedules
+              - scheduler:CreateScheduleGroup
+              - scheduler:GetScheduleGroup
+            Resource: "*"
+          - Sid: IAMManageSyncBotPolicies
+            Effect: Allow
+            Action:
+              - iam:CreatePolicy
+              - iam:GetPolicy
+              - iam:DeletePolicy
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicyVersion
+              - iam:ListPolicyVersions
+              - iam:GetPolicyVersion
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:policy/syncbot-*"
 
 Outputs:
   GitHubDeployRoleArn:
@@ -277,3 +296,6 @@ Outputs:
   SuggestedProdStackName:
     Description: Suggested stack name for prod environment.
     Value: syncbot-prod
+  BootstrapTemplateSha256:
+    Description: sha256 of template.bootstrap.yaml from the last bootstrap deploy.
+    Value: !Ref TemplateContentSha256

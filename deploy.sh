@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # SyncBot infra-agnostic deploy launcher.
-# Discovers provider scripts at infra/<provider>/scripts/deploy.sh and runs one.
+# Discovers provider scripts at infra/<provider>/scripts/deploy.sh and runs
+# the one named by CLOUD_PROVIDER in .env.deploy.<stage>.
 #
 # Phases when executed as ./deploy.sh (not when sourced):
-#   1) Discover infra/*/scripts/deploy.sh
-#   2) Interactive menu or CLI selection (provider name or index)
-#   3) Resolve script path and exec the provider deploy script with bash
+#   1) Parse flags (--env, --bootstrap, --setup-github, --verbose, --update-stack)
+#   2) Load .env.deploy.<stage> and require CLOUD_PROVIDER
+#   3) Exec infra/<CLOUD_PROVIDER>/scripts/deploy.sh
 #
 # Prerequisite helpers below are also sourced by infra/*/scripts/deploy.sh:
 #   source "$REPO_ROOT/deploy.sh"
@@ -72,14 +73,6 @@ prereqs_hint_python3() {
   echo "Install Python 3.12+ (the deploy helpers use python3 for manifest/JSON helpers):"
   echo "  https://www.python.org/downloads/"
   echo "  Documentation: https://docs.python.org/3/"
-}
-
-prereqs_hint_docker() {
-  echo "Install Docker (used by sam build --use-container on AWS):"
-  case "$(uname -s 2>/dev/null)" in
-    Linux) echo "  https://docs.docker.com/engine/install/" ;;
-    *) echo "  https://www.docker.com/products/docker-desktop/" ;;
-  esac
 }
 
 prereqs_hint_curl() {
@@ -237,41 +230,6 @@ prompt_log_level() {
 
 # App settings (used by infra/aws and infra/gcp deploy scripts). Hints on stderr; value on stdout.
 
-prompt_require_admin() {
-  local default="$1"
-  echo "Restrict sync configuration to workspace admins and owners only." >&2
-  local hint="Y/n"
-  [[ "$default" == "false" ]] && hint="y/N"
-  while true; do
-    local answer
-    read -r -p "REQUIRE_ADMIN [$hint]: " answer
-    if [[ -z "$answer" ]]; then
-      echo "$default"
-      return 0
-    fi
-    case "$answer" in
-      [Yy] | yes | YES | true | TRUE) echo "true"; return 0 ;;
-      [Nn] | no | NO | false | FALSE) echo "false"; return 0 ;;
-    esac
-    echo "Enter y or n (current: $default)." >&2
-  done
-}
-
-prompt_soft_delete_retention_days() {
-  local default="$1"
-  echo "Days to keep soft-deleted workspace data before permanent purge." >&2
-  while true; do
-    local v
-    read -r -p "SOFT_DELETE_RETENTION_DAYS [$default]: " v
-    v="${v:-$default}"
-    if [[ "$v" =~ ^[0-9]+$ ]] && [[ "$v" -gt 0 ]]; then
-      echo "$v"
-      return 0
-    fi
-    echo "Enter a positive integer." >&2
-  done
-}
-
 prompt_primary_workspace() {
   local default="$1"
   echo "Slack Team ID for PRIMARY_WORKSPACE (required for backup/restore to appear; also scopes DB reset)." >&2
@@ -289,44 +247,6 @@ prompt_primary_workspace() {
     "" | none) echo "" ;;
     *) echo "$v" ;;
   esac
-}
-
-prompt_federation_enabled() {
-  local default="$1"
-  echo "Allow external connections between SyncBot instances (federation)." >&2
-  local hint="y/N"
-  [[ "$default" == "true" ]] && hint="Y/n"
-  while true; do
-    local answer
-    read -r -p "SYNCBOT_FEDERATION_ENABLED [$hint]: " answer
-    if [[ -z "$answer" ]]; then
-      echo "$default"
-      return 0
-    fi
-    case "$answer" in
-      [Yy] | yes | YES | true | TRUE) echo "true"; return 0 ;;
-      [Nn] | no | NO | false | FALSE) echo "false"; return 0 ;;
-    esac
-    echo "Enter y or n (current: $default)." >&2
-  done
-}
-
-prompt_instance_id() {
-  local default="$1"
-  echo "Unique UUID for this SyncBot instance (leave empty to auto-generate at runtime)." >&2
-  local disp="${default:-(empty)}"
-  local v
-  read -r -p "SYNCBOT_INSTANCE_ID [$disp]: " v
-  echo "${v:-$default}"
-}
-
-prompt_public_url() {
-  local default="$1"
-  echo "Public HTTPS base URL for this instance (required for federation)." >&2
-  local disp="${default:-(empty)}"
-  local v
-  read -r -p "SYNCBOT_PUBLIC_URL [$disp]: " v
-  echo "${v:-$default}"
 }
 
 # Parse owner/repo from a github.com git remote URL (ssh, https, ssh://). Empty if not GitHub.
@@ -361,6 +281,16 @@ prompt_github_repo_for_actions() {
   }
   canon="$(mktemp)"
   tmp="$(mktemp)"
+
+  if [[ -n "${GITHUB_REPO:-}" ]]; then
+    if [[ "$GITHUB_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+      echo "Using GitHub repository: $GITHUB_REPO (from GITHUB_REPO env var)" >&2
+      _cr_done
+      echo "$GITHUB_REPO"
+      return 0
+    fi
+    echo "Warning: GITHUB_REPO is set but invalid (expected owner/repo); ignoring." >&2
+  fi
 
   if ! git -C "$git_dir" rev-parse --git-dir >/dev/null 2>&1; then
     echo "Not a git checkout; enter GitHub owner/repo manually." >&2
@@ -520,16 +450,14 @@ _prompt_deploy_tasks_parsechoices() {
 
 prompt_deploy_tasks_aws() {
   echo "=== Deploy Tasks ==="
-  printf '  1) %s\n' "Bootstrap - Create/sync bootstrap stack"
-  printf '  2) %s\n' "Build/Deploy - SAM build + deploy"
-  printf '  3) %s\n' "CI/CD - GitHub Actions configuration"
-  printf '  4) %s\n' "Slack API - Configure Slack app via API"
-  printf '  5) %s\n' "Backup Secrets - Print DR backup secrets"
-  local default_all="1,2,3,4,5"
+  printf '  1) %s\n' "Build/Deploy - SAM build + deploy"
+  printf '  2) %s\n' "CI/CD - GitHub Actions configuration"
+  printf '  3) %s\n' "Slack API - Configure Slack app via API"
+  local default_all="1,2,3"
   local choices=""
   read -r -e -p "Select tasks (comma-separated) [$default_all]: " choices
   choices="${choices:-$default_all}"
-  _prompt_deploy_tasks_parsechoices "$choices" TASK_BOOTSTRAP TASK_BUILD_DEPLOY TASK_CICD TASK_SLACK_API TASK_BACKUP_SECRETS
+  _prompt_deploy_tasks_parsechoices "$choices" TASK_BUILD_DEPLOY TASK_CICD TASK_SLACK_API
 }
 
 prompt_deploy_tasks_gcp() {
@@ -537,12 +465,30 @@ prompt_deploy_tasks_gcp() {
   printf '  1) %s\n' "Build/Deploy - Terraform plan + apply"
   printf '  2) %s\n' "CI/CD - GitHub Actions configuration"
   printf '  3) %s\n' "Slack API - Configure Slack app via API"
-  printf '  4) %s\n' "Backup Secrets - Print DR backup secrets"
-  local default_all="1,2,3,4"
+  local default_all="1,2,3"
   local choices=""
   read -r -e -p "Select tasks (comma-separated) [$default_all]: " choices
   choices="${choices:-$default_all}"
-  _prompt_deploy_tasks_parsechoices "$choices" TASK_BUILD_DEPLOY TASK_CICD TASK_SLACK_API TASK_BACKUP_SECRETS
+  _prompt_deploy_tasks_parsechoices "$choices" TASK_BUILD_DEPLOY TASK_CICD TASK_SLACK_API
+}
+
+# ---------------------------------------------------------------------------
+# Env file helpers (shared with provider scripts for save-back).
+# ---------------------------------------------------------------------------
+
+update_env_file() {
+  local file="$1" key="$2" value="$3"
+  if [[ ! -f "$file" ]]; then
+    echo "${key}=${value}" >> "$file"
+    return
+  fi
+  if grep -q "^${key}=" "$file" 2>/dev/null; then
+    sed -i.bak "s|^${key}=.*|${key}=${value}|" "$file" && rm -f "${file}.bak"
+  elif grep -q "^# *${key}=" "$file" 2>/dev/null; then
+    sed -i.bak "s|^# *${key}=.*|${key}=${value}|" "$file" && rm -f "${file}.bak"
+  else
+    echo "${key}=${value}" >> "$file"
+  fi
 }
 
 # When sourced by infra/*/scripts/deploy.sh, only load helpers above.
@@ -556,19 +502,40 @@ fi
 
 usage() {
   cat <<EOF
-Usage: ./deploy.sh [selection]
+Usage: ./deploy.sh [--env <stage>] [--bootstrap] [--setup-github] [--verbose]
+                   [--update-stack]
 
-No args:
-  Scan infra/*/scripts/deploy.sh, show a numbered menu, and run your choice.
+Platform comes from CLOUD_PROVIDER in .env.deploy.<stage> (aws or gcp).
+There is no aws/gcp command-line argument.
 
-With [selection]:
-  - provider name (e.g. aws, gcp), OR
-  - menu index (e.g. 1, 2)
+Options:
+  --env <stage>     Source .env.deploy.<stage> and run a non-interactive deploy
+                    (e.g. --env test, --env prod).
+  --bootstrap       AWS only. Force bootstrap stack create/sync even if the
+                    template hash already matches. First AWS deploy creates
+                    the bootstrap stack automatically when it is missing.
+  --setup-github    Push config to GitHub environment vars/secrets after deploy.
+                    Works with --env (non-interactive) or interactive deploys.
+  --verbose         Extended deploy receipts (SAM/Terraform parameters, inline
+                    Slack manifest) and extra screen output for debugging.
+  --update-stack    AWS only. Skip sam deploy and use aws cloudformation
+                    update-stack directly (no changeset; bypasses early
+                    validation). Normally unnecessary: the AWS deploy script
+                    auto-retries with update-stack when CloudFormation rejects
+                    a changeset with EarlyValidation::ResourceExistenceCheck.
+
+No --env:
+  Prompt for stage, load that env file, then the provider script's interactive
+  task menu (build / CI/CD / Slack API as applicable).
 
 Examples:
   ./deploy.sh
-  ./deploy.sh aws
-  ./deploy.sh 1
+  ./deploy.sh --env test
+  ./deploy.sh --env test --bootstrap
+  ./deploy.sh --env prod --setup-github
+  ./deploy.sh --setup-github
+  ./deploy.sh --env test --verbose
+  ./deploy.sh --env test --update-stack
 EOF
 }
 
@@ -582,52 +549,13 @@ discover_deploy_scripts() {
   shopt -u nullglob
 }
 
-select_script_interactive() {
+resolve_script_from_cloud_provider() {
   local entries="$1"
-  local line idx=1
-
-  echo "=== Choose Provider ===" >&2
-  echo "Repository: $REPO_ROOT" >&2
-  echo >&2
-  echo "Discovered deploy scripts:" >&2
-
+  local wanted="$2"
+  local provider path
   while IFS=$'\t' read -r provider path; do
     [[ -z "$provider" ]] && continue
-    rel_path="${path#$REPO_ROOT/}"
-    echo "  $idx) $provider ($rel_path)" >&2
-    idx=$((idx + 1))
-  done <<< "$entries"
-  echo "  0) Exit" >&2
-  echo >&2
-
-  local choice
-  read -r -p "Choose provider [1]: " choice >&2
-  choice="${choice:-1}"
-  echo "$choice"
-}
-
-resolve_script_from_selection() {
-  local entries="$1"
-  local selection="$2"
-  local line idx=1 provider path
-
-  # Numeric selection
-  if [[ "$selection" =~ ^[0-9]+$ ]]; then
-    while IFS=$'\t' read -r provider path; do
-      [[ -z "$provider" ]] && continue
-      if [[ "$idx" -eq "$selection" ]]; then
-        echo "$path"
-        return 0
-      fi
-      idx=$((idx + 1))
-    done <<< "$entries"
-    return 1
-  fi
-
-  # Provider name selection
-  while IFS=$'\t' read -r provider path; do
-    [[ -z "$provider" ]] && continue
-    if [[ "$provider" == "$selection" ]]; then
+    if [[ "$provider" == "$wanted" ]]; then
       echo "$path"
       return 0
     fi
@@ -635,11 +563,90 @@ resolve_script_from_selection() {
   return 1
 }
 
-main() {
-  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
-    usage
-    exit 0
+load_deploy_env_file() {
+  local env_name="$1"
+  local env_file="$REPO_ROOT/.env.deploy.$env_name"
+  if [[ ! -f "$env_file" ]]; then
+    echo "Error: env file not found: $env_file" >&2
+    echo "Copy .env.deploy.example to $env_file, set CLOUD_PROVIDER, and fill in values." >&2
+    exit 1
   fi
+  echo "=== Loading $env_file ==="
+  set -a
+  # shellcheck disable=SC1090
+  source "$env_file"
+  set +a
+  export STAGE="$env_name"
+  export ENV_FILE_PATH="$env_file"
+  if [[ -z "${CLOUD_PROVIDER:-}" ]]; then
+    echo "Error: CLOUD_PROVIDER is unset in $env_file (set aws or gcp)." >&2
+    exit 1
+  fi
+}
+
+main() {
+  local env_name="" setup_github="false" bootstrap="false" verbose="false" update_stack="false"
+  local env_from_flag="false"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h | --help | help)
+        usage
+        exit 0
+        ;;
+      --env)
+        shift
+        env_name="${1:?--env requires a stage name (e.g. test, prod)}"
+        env_from_flag="true"
+        shift
+        ;;
+      --setup-github)
+        setup_github="true"
+        shift
+        ;;
+      --bootstrap)
+        bootstrap="true"
+        shift
+        ;;
+      --verbose)
+        verbose="true"
+        shift
+        ;;
+      --update-stack)
+        update_stack="true"
+        shift
+        ;;
+      *)
+        echo "Error: unexpected argument '$1'." >&2
+        echo "Platform is CLOUD_PROVIDER in .env.deploy.<stage>, not a CLI argument." >&2
+        echo >&2
+        usage
+        exit 1
+        ;;
+    esac
+  done
+
+  export SETUP_GITHUB="$setup_github"
+  export BOOTSTRAP="$bootstrap"
+  export VERBOSE="$verbose"
+
+  if [[ -z "$env_name" ]]; then
+    local stage_choice
+    read -r -p "Stage (test/prod) [test]: " stage_choice
+    env_name="${stage_choice:-test}"
+  fi
+
+  load_deploy_env_file "$env_name"
+  if [[ "$env_from_flag" == "true" ]]; then
+    export ENV_FILE_LOADED="true"
+  fi
+
+  # AWS_UPDATE_STACK: CLI --update-stack wins; else keep value from .env.deploy.* if set.
+  if [[ "$update_stack" == "true" ]]; then
+    export AWS_UPDATE_STACK=true
+  fi
+  export UPDATE_STACK="${AWS_UPDATE_STACK:-${UPDATE_STACK:-false}}"
+  export AWS_UPDATE_STACK="${AWS_UPDATE_STACK:-$UPDATE_STACK}"
 
   local entries
   entries="$(discover_deploy_scripts)"
@@ -648,37 +655,31 @@ main() {
     exit 1
   fi
 
-  local selection="${1:-}"
-  if [[ -z "$selection" ]]; then
-    selection="$(select_script_interactive "$entries")"
-  fi
-  if [[ "$selection" == "0" ]]; then
-    exit 0
-  fi
-
   local script_path
-  if ! script_path="$(resolve_script_from_selection "$entries" "$selection")"; then
-    echo "Invalid selection: $selection" >&2
-    echo
-    usage
+  if ! script_path="$(resolve_script_from_cloud_provider "$entries" "$CLOUD_PROVIDER")"; then
+    echo "Error: no deploy script for CLOUD_PROVIDER=$CLOUD_PROVIDER (expected infra/$CLOUD_PROVIDER/scripts/deploy.sh)." >&2
     exit 1
   fi
 
-  echo "=== Sync Python Dependencies ==="
-  if command -v poetry &>/dev/null; then
-    poetry update --quiet
-    if poetry self show plugins 2>/dev/null | grep -q poetry-plugin-export; then
-      poetry export -f requirements.txt --without-hashes -o "$REPO_ROOT/syncbot/requirements.txt"
-      echo "syncbot/requirements.txt updated from poetry.lock."
+  # Match GitHub Actions: install committed pins. Do not run poetry update or rewrite
+  # poetry.lock / *requirements.txt. Warn if an export from the lockfile differs.
+  if command -v poetry &>/dev/null \
+    && poetry self show plugins 2>/dev/null | grep -q poetry-plugin-export; then
+    echo "=== Check Python dependency export ==="
+    _export_tmp="$(mktemp -d)"
+    if poetry export -f requirements.txt --without-hashes -o "$_export_tmp/syncbot-requirements.txt"; then
+      if ! cmp -s "$_export_tmp/syncbot-requirements.txt" "$REPO_ROOT/syncbot/requirements.txt"; then
+        echo "Warning: committed *requirements.txt files differ from a poetry.lock export." >&2
+        echo "Deploy uses the committed pins (same as GitHub Actions). Refresh with pre-commit or poetry export; see docs/DEVELOPMENT.md." >&2
+      fi
     else
-      echo "Warning: poetry-plugin-export not installed. Run: poetry self add poetry-plugin-export" >&2
-      echo "Skipping requirements.txt sync." >&2
+      echo "Warning: poetry export failed; continuing with committed *requirements.txt." >&2
     fi
-  else
-    echo "Warning: poetry not found. Skipping dependency sync." >&2
+    rm -rf "$_export_tmp"
   fi
 
   echo "=== Run Provider Script ==="
+  echo "CLOUD_PROVIDER=$CLOUD_PROVIDER"
   echo "Running: $script_path"
   bash "$script_path"
 }

@@ -1,0 +1,15 @@
+---
+description: Source-to-target envelope pipeline guardrails
+globs: "**/message.py,**/reaction_event.py,**/channel_sync.py,**/envelope.py,**/sync_apply.py,**/sync_pipeline.py,**/post_meta.py,**/slack_write.py,**/sync_participation.py,**/federation/api.py,**/federation/deliver.py"
+alwaysApply: false
+---
+
+# Target pipeline
+
+- Build one source-canonical envelope and route messages, files, edits, deletes, threads, and reactions through `run_sync_pipeline`. `kind` is `message` or `reaction`; `action` is kind-specific. Replies, files in a thread, edits, deletes, and reactions include `thread_post_id` or the message `post_id` so fan-out stays on those PostMeta records. A Channel that publishes in more than one sync still must not CREATE a threaded envelope as a new top-level message on a sibling sync.
+- An origin must publish and a target must subscribe. Discover fan-out with `iter_publish_targets`, dedupe by workspace and channel, and do not reintroduce `get_sync_list`. A Channel may be published in more than one group; reject only a second subscribe to the same source.
+- A synced copy and a federation inbound write never originate another envelope. There is no second hop.
+- `SyncChannel.get_id()` is the integer primary key, not `channel_id`.
+- Participation controls reaction direction. Create Sync offers Publish only and Publish and Subscribe. Join Sync and Edit Sync also offer Subscribe only. Keep reaction UI to Hybrid, Direct, or Off and do not revive leftover reaction-direction action IDs. Off is a no-op for reaction add and remove.
+- Use source/target naming in new code and docs. Do not introduce new `dest` or `destination` names.
+- Name helpers with verbs (`build_`, `find_`, `get_`, `_format_`, `_parse_`, `_handle_`). Reuse source, target, origin, PostMeta, post_records, envelope, people, and channel_ref. Do not add graph, member_ref, or other synonyms for those.

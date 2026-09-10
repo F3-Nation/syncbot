@@ -12,6 +12,48 @@ from slack import actions
 _logger = logging.getLogger(__name__)
 
 
+_ERROR_DM_VALUE_MAX = 240
+
+
+def format_error_dm(summary: str, details: dict[str, Any] | None = None) -> str:
+    """Human summary plus a fenced details block the user can copy."""
+    if not details:
+        return summary
+    lines: list[str] = []
+    for key, value in details.items():
+        if value is None or value == "":
+            continue
+        text = str(value).replace("```", "`")
+        if len(text) > _ERROR_DM_VALUE_MAX:
+            text = text[: _ERROR_DM_VALUE_MAX - 1] + "…"
+        lines.append(f"{key}: {text}")
+    if not lines:
+        return summary
+    return f"{summary}\n```\n" + "\n".join(lines) + "\n```"
+
+
+def synced_from_line_username(display_name: str | None, workspace_name: str | None = None) -> str:
+    """Display name used on the Slack from line for a synced message.
+
+    Mapped authors pass ``workspace_name=None``. Unmapped authors include
+    ``(source workspace)`` after the name, matching ``chat.postMessage``.
+    """
+    name = (display_name or "").strip() or "Someone"
+    if workspace_name:
+        return f"{name} ({workspace_name})"
+    return name
+
+
+def code_ticked_display_name(display_name: str | None, workspace_name: str | None = None) -> str:
+    """Name in code ticks, optionally with (Workspace). From-line, unmapped people, source #channel."""
+    return f"`{synced_from_line_username(display_name, workspace_name)}`"
+
+
+def format_file_share_notice(display_name: str | None, workspace_name: str | None = None) -> str:
+    """Bot notice for who shared a file. Never tags; from-line name in code ticks."""
+    return f"{code_ticked_display_name(display_name, workspace_name)} shared a file"
+
+
 def safe_get(data: Any, *keys: Any) -> Any:
     """Safely traverse nested dicts/lists. Returns None on missing keys."""
     if not data:
@@ -33,18 +75,28 @@ def get_user_id_from_body(body: dict) -> str | None:
     return safe_get(body, "user_id") or safe_get(body, "user", "id")
 
 
-def is_user_authorized(client, user_id: str) -> bool:
-    """Return *True* if the user is allowed to configure SyncBot.
+_REQUIRE_ADMIN_WARNED = False
 
-    When ``REQUIRE_ADMIN`` is ``"true"`` (the default), only workspace
-    admins and owners are authorized.
-    """
+
+def _warn_require_admin_leftover() -> None:
+    global _REQUIRE_ADMIN_WARNED
+    if _REQUIRE_ADMIN_WARNED:
+        return
+    raw = os.environ.get(constants.REQUIRE_ADMIN)
+    if raw is None or raw.strip() == "":
+        return
+    _REQUIRE_ADMIN_WARNED = True
+    _logger.warning(
+        "%s is ignored; Slack admins and owners configure Settings, and managers come from Settings extra managers",
+        constants.REQUIRE_ADMIN,
+    )
+
+
+def is_workspace_admin(client, user_id: str) -> bool:
+    """Return *True* if the user is a Slack workspace admin or owner."""
     from .slack_api import _users_info
 
-    require_admin = os.environ.get(constants.REQUIRE_ADMIN, "true").lower()
-    if require_admin != "true":
-        return True
-
+    _warn_require_admin_leftover()
     try:
         res = _users_info(client, user_id)
     except SlackApiError:
@@ -53,6 +105,24 @@ def is_user_authorized(client, user_id: str) -> bool:
 
     user = safe_get(res, "user") or {}
     return bool(user.get("is_admin") or user.get("is_owner"))
+
+
+def is_workspace_manager(client, user_id: str, team_id: str | None) -> bool:
+    """Return *True* if the user may manage groups, syncs, and channel configuration."""
+    from .workspace_settings import extra_manager_user_ids
+
+    _warn_require_admin_leftover()
+    if is_workspace_admin(client, user_id):
+        return True
+    if not team_id or not user_id:
+        return False
+    return user_id in extra_manager_user_ids(team_id)
+
+
+def is_primary_workspace(team_id: str | None) -> bool:
+    """Return *True* when *team_id* matches ``PRIMARY_WORKSPACE``."""
+    primary = (os.environ.get(constants.PRIMARY_WORKSPACE) or "").strip()
+    return bool(primary and (team_id or "") == primary)
 
 
 def is_backup_visible_for_workspace(team_id: str | None) -> bool:
@@ -91,6 +161,16 @@ def is_db_reset_visible_for_workspace(team_id: str | None) -> bool:
     return True
 
 
+def is_settings_visible_for_workspace(team_id: str | None) -> bool:
+    """Return True if the Settings button may appear for this workspace.
+
+    Any installed workspace may open Settings; Slack admin/owner is enforced
+    when the modal opens. Instance-wide fields inside the modal still require
+    ``PRIMARY_WORKSPACE`` to match.
+    """
+    return bool((team_id or "").strip())
+
+
 def format_admin_label(client, user_id: str, workspace) -> tuple[str, str]:
     """Return ``(display_name, full_label)`` for an admin."""
     from .slack_api import get_user_info
@@ -110,14 +190,19 @@ _PREFIXED_ACTIONS = (
     actions.CONFIG_ACCEPT_GROUP_REQUEST,
     actions.CONFIG_DECLINE_GROUP_REQUEST,
     actions.CONFIG_CANCEL_GROUP_REQUEST,
-    actions.CONFIG_SUBSCRIBE_CHANNEL,
-    actions.CONFIG_UNPUBLISH_CHANNEL,
+    actions.CONFIG_PROMOTE_TO_OWNER,
+    actions.CONFIG_DEMOTE_SELF,
+    actions.CONFIG_DISBAND_GROUP,
+    actions.CONFIG_JOIN_SYNC,
+    actions.CONFIG_EDIT_SYNC,
+    actions.CONFIG_LEAVE_SYNC,
     actions.CONFIG_USER_MAPPING_EDIT,
-    actions.CONFIG_REMOVE_SYNC,
     actions.CONFIG_RESUME_SYNC,
     actions.CONFIG_PAUSE_SYNC,
-    actions.CONFIG_STOP_SYNC,
 )
+# ``create_sync`` is not prefixed so ``create_sync_select`` stays a picker.
+# ``join_sync`` is prefixed (Home buttons are ``join_sync_{id}``), so the Join
+# Sync picker must not start with ``join_sync_`` (see CONFIG_JOIN_SYNC_SELECT).
 
 
 def get_request_type(body: dict) -> tuple[str, str]:

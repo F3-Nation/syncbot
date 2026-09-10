@@ -8,13 +8,50 @@ from logging import Logger
 from slack_sdk.web import WebClient
 
 import builders
-import constants
 import federation
 import helpers
 from db import DbManager, schemas
+from helpers.workspace import invalidate_fed_ws_for_sync_cache
 from slack import actions, orm
 
 _logger = logging.getLogger(__name__)
+
+
+def _dm_actor(client: WebClient, body: dict, text: str) -> None:
+    """DM the acting user. Best-effort; never raises."""
+    user_id = helpers.safe_get(body, "user", "id") or helpers.get_user_id_from_body(body)
+    if not user_id:
+        return
+    try:
+        dm = client.conversations_open(users=[user_id])
+        dm_channel = helpers.safe_get(dm, "channel", "id")
+        if dm_channel:
+            client.chat_postMessage(channel=dm_channel, text=text)
+    except Exception as e:
+        _logger.warning(f"Failed to DM federation notice: {e}")
+
+
+def _require_primary_admin(
+    body: dict,
+    client: WebClient,
+    context: dict,
+    *,
+    action: str,
+) -> schemas.Workspace | None:
+    """Return the workspace when the actor is a primary-workspace Slack admin."""
+    user_id = helpers.get_user_id_from_body(body)
+    team_id = (
+        helpers.safe_get(body, "view", "team_id")
+        or helpers.safe_get(body, "team", "id")
+        or helpers.safe_get(body, "team_id")
+    )
+    if not user_id or not team_id:
+        _logger.warning("authorization_denied", extra={"user_id": user_id, "action": action})
+        return None
+    if not helpers.is_primary_workspace(team_id) or not helpers.is_workspace_admin(client, user_id):
+        _logger.warning("authorization_denied", extra={"user_id": user_id, "action": action, "team_id": team_id})
+        return None
+    return helpers.get_workspace_record(team_id, body, context, client)
 
 
 def _exchange_user_directory(
@@ -93,7 +130,9 @@ def handle_generate_federation_code(
     context: dict,
 ) -> None:
     """Open a modal asking for a label before generating the connection code."""
-    if not constants.FEDERATION_ENABLED:
+    if not helpers.federation_enabled():
+        return
+    if not _require_primary_admin(body, client, context, action="generate_federation_code"):
         return
 
     trigger_id = helpers.safe_get(body, "trigger_id")
@@ -117,9 +156,10 @@ def handle_generate_federation_code(
     ]
 
     view = orm.BlockView(blocks=blocks)
-    client.views_open(
-        trigger_id=trigger_id,
-        view={
+    orm.open_or_push_view(
+        client,
+        trigger_id,
+        {
             "type": "modal",
             "callback_id": actions.CONFIG_FEDERATION_LABEL_SUBMIT,
             "title": {"type": "plain_text", "text": "New Connection"},
@@ -127,6 +167,7 @@ def handle_generate_federation_code(
             "close": {"type": "plain_text", "text": "Cancel"},
             "blocks": view.as_form_field(),
         },
+        body=body,
     )
 
 
@@ -137,17 +178,22 @@ def handle_federation_label_submit(
     context: dict,
 ) -> None:
     """Generate the connection code after the admin provides a label."""
-    if not constants.FEDERATION_ENABLED:
+    if not helpers.federation_enabled():
         return
 
-    team_id = helpers.safe_get(body, "view", "team_id") or helpers.safe_get(body, "team_id")
-    workspace_record = helpers.get_workspace_record(team_id, body, context, client)
+    workspace_record = _require_primary_admin(body, client, context, action="federation_label_submit")
     if not workspace_record:
         return
 
-    public_url = federation.get_public_url()
+    public_url = federation.get_public_url(context)
     if not public_url:
         _logger.warning("federation_no_public_url")
+        _dm_actor(
+            client,
+            body,
+            ":warning: SyncBot does not know this instance's public URL yet. "
+            "Open the Home tab (or wait for a Slack event), then generate the code again.",
+        )
         return
 
     values = helpers.safe_get(body, "view", "state", "values") or {}
@@ -157,7 +203,19 @@ def handle_federation_label_submit(
             if action_id == actions.CONFIG_FEDERATION_LABEL_INPUT:
                 label = (action_data.get("value") or "").strip()
 
-    encoded, raw_code = federation.generate_federation_code(workspace_record.id, label=label or None)
+    try:
+        encoded, raw_code = federation.generate_federation_code(
+            workspace_record.id, label=label or None, context=context
+        )
+    except ValueError:
+        _logger.warning("federation_no_public_url")
+        _dm_actor(
+            client,
+            body,
+            ":warning: SyncBot does not know this instance's public URL yet. "
+            "Open the Home tab (or wait for a Slack event), then generate the code again.",
+        )
+        return
 
     user_id = helpers.safe_get(body, "user", "id") or helpers.get_user_id_from_body(body)
     if user_id:
@@ -181,7 +239,7 @@ def handle_federation_label_submit(
         extra={"workspace_id": workspace_record.id, "code": raw_code, "label": label},
     )
 
-    builders.refresh_home_tab_for_workspace(workspace_record, logger, context=context)
+    builders.refresh_home_tab_for_workspace(workspace_record, logger, context=context, user_id=user_id)
 
 
 def handle_enter_federation_code(
@@ -191,7 +249,9 @@ def handle_enter_federation_code(
     context: dict,
 ) -> None:
     """Open a modal for the admin to paste a federation code."""
-    if not constants.FEDERATION_ENABLED:
+    if not helpers.federation_enabled():
+        return
+    if not _require_primary_admin(body, client, context, action="enter_federation_code"):
         return
 
     trigger_id = helpers.safe_get(body, "trigger_id")
@@ -210,9 +270,10 @@ def handle_enter_federation_code(
     ]
 
     view = orm.BlockView(blocks=blocks)
-    client.views_open(
-        trigger_id=trigger_id,
-        view={
+    orm.open_or_push_view(
+        client,
+        trigger_id,
+        {
             "type": "modal",
             "callback_id": actions.CONFIG_FEDERATION_CODE_SUBMIT,
             "title": {"type": "plain_text", "text": "Enter Connection Code"},
@@ -220,6 +281,7 @@ def handle_enter_federation_code(
             "close": {"type": "plain_text", "text": "Cancel"},
             "blocks": view.as_form_field(),
         },
+        body=body,
     )
 
 
@@ -230,11 +292,10 @@ def handle_federation_code_submit(
     context: dict,
 ) -> None:
     """Process a submitted federation code and initiate cross-instance connection."""
-    if not constants.FEDERATION_ENABLED:
+    if not helpers.federation_enabled():
         return
 
-    team_id = helpers.safe_get(body, "view", "team_id") or helpers.safe_get(body, "team_id")
-    workspace_record = helpers.get_workspace_record(team_id, body, context, client)
+    workspace_record = _require_primary_admin(body, client, context, action="federation_code_submit")
     if not workspace_record:
         return
 
@@ -247,11 +308,17 @@ def handle_federation_code_submit(
 
     if not code_text:
         _logger.warning("federation_code_submit: empty code")
+        _dm_actor(client, body, ":warning: Paste the full connection code from the other SyncBot instance.")
         return
 
     payload = federation.parse_federation_code(code_text)
     if not payload:
         _logger.warning("federation_code_submit: invalid code format")
+        _dm_actor(
+            client,
+            body,
+            ":warning: That connection code is invalid or was tampered with. Ask the other admin to generate a new one.",
+        )
         return
 
     remote_url = payload["webhook_url"]
@@ -263,11 +330,18 @@ def handle_federation_code_submit(
         remote_code,
         team_id=workspace_record.team_id,
         workspace_name=workspace_record.workspace_name or None,
+        context=context,
     )
     if not result or not result.get("ok"):
         _logger.error(
             "federation_connect_failed",
             extra={"remote_url": remote_url, "result": result},
+        )
+        _dm_actor(
+            client,
+            body,
+            ":warning: Could not connect to the other SyncBot instance. "
+            "Check that federation is enabled there and try again.",
         )
         return
 
@@ -286,7 +360,6 @@ def handle_federation_code_submit(
         invite_code=f"FED-{secrets.token_hex(4).upper()}",
         status="active",
         created_at=now,
-        created_by_workspace_id=workspace_record.id,
     )
     DbManager.create_record(group)
 
@@ -294,7 +367,7 @@ def handle_federation_code_submit(
         group_id=group.id,
         workspace_id=workspace_record.id,
         status="active",
-        role="creator",
+        role="owner",
         joined_at=now,
     )
     DbManager.create_record(local_member)
@@ -308,6 +381,8 @@ def handle_federation_code_submit(
     )
     DbManager.create_record(fed_member)
 
+    invalidate_fed_ws_for_sync_cache()
+
     _logger.info(
         "federation_connection_established",
         extra={
@@ -320,7 +395,8 @@ def handle_federation_code_submit(
 
     _exchange_user_directory(fed_ws, workspace_record)
 
-    builders.refresh_home_tab_for_workspace(workspace_record, logger, context=context)
+    acting_user_id = helpers.safe_get(body, "user", "id") or helpers.get_user_id_from_body(body)
+    builders.refresh_home_tab_for_workspace(workspace_record, logger, context=context, user_id=acting_user_id)
 
 
 def handle_remove_federation_connection(
@@ -330,6 +406,10 @@ def handle_remove_federation_connection(
     context: dict,
 ) -> None:
     """Remove a federation connection (group membership)."""
+    workspace_record = _require_primary_admin(body, client, context, action="remove_federation_connection")
+    if not workspace_record:
+        return
+
     action_data = helpers.safe_get(body, "actions", 0) or {}
     action_id: str = action_data.get("action_id", "")
     member_id_str = action_id.replace(f"{actions.CONFIG_REMOVE_FEDERATION_CONNECTION}_", "")
@@ -345,6 +425,7 @@ def handle_remove_federation_connection(
         return
 
     from datetime import UTC, datetime
+
     now = datetime.now(UTC)
     DbManager.update_records(
         schemas.WorkspaceGroupMember,
@@ -355,9 +436,12 @@ def handle_remove_federation_connection(
         },
     )
 
+    invalidate_fed_ws_for_sync_cache()
+
     _logger.info("federation_connection_removed", extra={"member_id": member_id})
 
     team_id = helpers.safe_get(body, "team", "id") or helpers.safe_get(body, "view", "team_id")
     workspace_record = helpers.get_workspace_record(team_id, body, context, client) if team_id else None
     if workspace_record:
-        builders.refresh_home_tab_for_workspace(workspace_record, logger, context=context)
+        acting_user_id = helpers.safe_get(body, "user", "id") or helpers.get_user_id_from_body(body)
+        builders.refresh_home_tab_for_workspace(workspace_record, logger, context=context, user_id=acting_user_id)

@@ -12,19 +12,20 @@ Provides:
 """
 
 import base64
+import hashlib
 import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import time
-import uuid
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import requests
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
     NoEncryption,
@@ -36,6 +37,7 @@ from cryptography.hazmat.primitives.serialization import (
 
 import constants
 from db import DbManager, schemas
+from helpers.encryption import decrypt_bot_token, encrypt_bot_token
 
 _logger = logging.getLogger(__name__)
 
@@ -46,27 +48,118 @@ FEDERATION_USER_AGENT = "SyncBot-Federation/1.0"
 # ---------------------------------------------------------------------------
 
 _INSTANCE_ID: str | None = None
+_LEGACY_INSTANCE_ID_WARNED = False
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def public_key_fingerprint(public_key_pem: str) -> str:
+    """Return the SHA-256 hex fingerprint of an Ed25519 public key (64 chars).
+
+    Hashes the raw 32-byte key, not the PEM wrapping, so the id stays stable
+    across PEM header or line-wrap differences.
+    """
+    public_key = load_pem_public_key(public_key_pem.encode())
+    if not isinstance(public_key, Ed25519PublicKey):
+        raise ValueError("not_ed25519_public_key")
+    raw = public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def instance_id_matches_public_key(instance_id: str, public_key_pem: str) -> bool:
+    """Return True when *instance_id* is this key's fingerprint, or a legacy UUID.
+
+    A 64-character hex id must match the fingerprint. Any other non-empty value
+    is treated as a pre-fingerprint UUID so mixed-version peers can still pair.
+    """
+    if not instance_id:
+        return False
+    try:
+        fingerprint = public_key_fingerprint(public_key_pem)
+    except Exception:
+        return False
+    if instance_id == fingerprint:
+        return True
+    return not bool(_SHA256_HEX_RE.fullmatch(instance_id))
 
 
 def get_instance_id() -> str:
-    """Return a persistent UUID identifying this SyncBot instance.
+    """Return this instance's federation id: SHA-256 of the Ed25519 public key.
 
-    Reads from ``SYNCBOT_INSTANCE_ID`` env var.  If not set, generates one
-    and stores it in-memory for the lifetime of the process.
+    The value is derived from the keypair and cached on ``instance_keys``.
+    Leftover ``SYNCBOT_INSTANCE_ID`` is ignored and warned.
     """
     global _INSTANCE_ID
+    _warn_legacy_instance_id_env()
     if _INSTANCE_ID:
         return _INSTANCE_ID
-    _INSTANCE_ID = os.environ.get("SYNCBOT_INSTANCE_ID") or str(uuid.uuid4())
+    _, public_pem = get_or_create_instance_keypair()
+    fingerprint = public_key_fingerprint(public_pem)
+    _INSTANCE_ID = fingerprint
+    _persist_instance_id(fingerprint)
     return _INSTANCE_ID
 
 
-def get_public_url() -> str:
-    """Return the public base URL of this instance (no trailing slash)."""
-    url = os.environ.get("SYNCBOT_PUBLIC_URL", "").rstrip("/")
+def _warn_legacy_instance_id_env() -> None:
+    global _LEGACY_INSTANCE_ID_WARNED
+    if _LEGACY_INSTANCE_ID_WARNED:
+        return
+    raw = os.environ.get(constants.SYNCBOT_INSTANCE_ID)
+    if raw is None or raw.strip() == "":
+        return
+    _LEGACY_INSTANCE_ID_WARNED = True
+    _logger.warning(
+        "%s is ignored; SyncBot uses a SHA-256 fingerprint of this instance's Ed25519 public key instead",
+        constants.SYNCBOT_INSTANCE_ID,
+    )
+
+
+def _persist_instance_id(instance_id: str) -> None:
+    """Write *instance_id* onto the instance_keys row, creating the keypair if needed."""
+    try:
+        existing = DbManager.find_records(schemas.InstanceKey, [])
+        if not existing:
+            get_or_create_instance_keypair()
+            existing = DbManager.find_records(schemas.InstanceKey, [])
+        if not existing:
+            return
+        current = getattr(existing[0], "instance_id", None)
+        if current == instance_id:
+            return
+        DbManager.update_records(
+            schemas.InstanceKey,
+            [schemas.InstanceKey.id == existing[0].id],
+            {schemas.InstanceKey.instance_id: instance_id},
+        )
+    except Exception:
+        _logger.debug("instance_id_persist_failed", extra={"instance_id": instance_id}, exc_info=True)
+
+
+def get_public_url(context: dict | None = None) -> str:
+    """Return the public base URL of this instance (no trailing slash).
+
+    Same origin Slack already uses for events: the Host of incoming requests,
+    via :func:`helpers.oauth.get_public_base_url`.
+    """
+    from helpers.oauth import get_public_base_url
+
+    url = get_public_base_url(context) or ""
     if not url:
-        _logger.warning("SYNCBOT_PUBLIC_URL is not set — federation will not work")
+        _logger.warning("public base URL is unknown — federation needs an incoming Slack request first")
     return url
+
+
+def federation_endpoint_url(context: dict | None = None) -> str:
+    """Return this instance's full federation endpoint (origin + mount path).
+
+    This is the ``webhook_url`` advertised in connection codes and pair
+    payloads. Peers store it verbatim and append resource subpaths such as
+    ``/message`` — they do not assume the mount path. Returns ``""`` when the
+    public origin is unknown.
+    """
+    base = get_public_url(context)
+    if not base:
+        return ""
+    return base.rstrip("/") + constants.FEDERATION_API_BASE_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -87,8 +180,6 @@ def get_or_create_instance_keypair():
     if _cached_private_key and _cached_public_pem:
         return _cached_private_key, _cached_public_pem
 
-    from helpers import decrypt_bot_token, encrypt_bot_token
-
     existing = DbManager.find_records(schemas.InstanceKey, [])
     if existing:
         private_pem = decrypt_bot_token(existing[0].private_key_encrypted)
@@ -98,17 +189,14 @@ def get_or_create_instance_keypair():
         return private_key, existing[0].public_key
 
     private_key = Ed25519PrivateKey.generate()
-    public_pem = private_key.public_key().public_bytes(
-        Encoding.PEM, PublicFormat.SubjectPublicKeyInfo
-    ).decode()
-    private_pem = private_key.private_bytes(
-        Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()
-    ).decode()
+    public_pem = private_key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+    private_pem = private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
 
     record = schemas.InstanceKey(
         public_key=public_pem,
         private_key_encrypted=encrypt_bot_token(private_pem),
         created_at=datetime.now(UTC),
+        instance_id=public_key_fingerprint(public_pem),
     )
     DbManager.create_record(record)
 
@@ -219,6 +307,7 @@ def validate_webhook_url(url: str) -> bool:
         return False
 
     import socket
+
     try:
         addr_infos = socket.getaddrinfo(hostname, None)
         for info in addr_infos:
@@ -241,25 +330,47 @@ def validate_webhook_url(url: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def generate_federation_code(workspace_id: int, label: str | None = None) -> tuple[str, str]:
-    """Generate a federation connection code and create a pending group record.
+_CONNECTION_CODE_SIGNED_KEYS = ("code", "webhook_url", "instance_id", "public_key")
 
-    Returns ``(encoded_payload, raw_code)`` where *encoded_payload* is the
-    base64-encoded JSON string the admin shares with the remote instance.
-    The payload includes this instance's public key for signature verification.
-    """
-    raw_code = "FED-" + secrets.token_hex(4).upper()
-    public_url = get_public_url()
-    instance_id = get_instance_id()
-    _, public_key_pem = get_or_create_instance_keypair()
 
+def _connection_payload_canonical(payload: dict) -> str:
+    """Canonical JSON of the signed connection-code fields (excludes ``sig``)."""
+    body = {key: payload[key] for key in _CONNECTION_CODE_SIGNED_KEYS}
+    return json.dumps(body, sort_keys=True, separators=(",", ":"))
+
+
+def encode_federation_connection_blob(webhook_url: str, instance_id: str, public_key_pem: str, code: str) -> str:
+    """Return a signed, base64-encoded connection payload."""
     payload = {
-        "code": raw_code,
-        "webhook_url": public_url,
+        "code": code,
+        "webhook_url": webhook_url,
         "instance_id": instance_id,
         "public_key": public_key_pem,
     }
-    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+    payload["sig"] = sign_body(_connection_payload_canonical(payload))
+    return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+
+
+def generate_federation_code(
+    workspace_id: int,
+    label: str | None = None,
+    *,
+    context: dict | None = None,
+) -> tuple[str, str]:
+    """Generate a federation connection code and create a pending group record.
+
+    Returns ``(encoded_payload, raw_code)`` where *encoded_payload* is the
+    signed base64-encoded JSON string the admin shares with the remote instance.
+    Raises ``ValueError`` if this instance's public URL is unknown.
+    """
+    endpoint = federation_endpoint_url(context)
+    if not endpoint:
+        raise ValueError("public_url_unknown")
+    instance_id = get_instance_id()
+    _, public_key_pem = get_or_create_instance_keypair()
+
+    raw_code = "FED-" + secrets.token_hex(4).upper()
+    encoded = encode_federation_connection_blob(endpoint, instance_id, public_key_pem, raw_code)
 
     now = datetime.now(UTC)
     group = schemas.WorkspaceGroup(
@@ -267,7 +378,6 @@ def generate_federation_code(workspace_id: int, label: str | None = None) -> tup
         invite_code=raw_code,
         status="active",
         created_at=now,
-        created_by_workspace_id=workspace_id,
     )
     DbManager.create_record(group)
 
@@ -275,7 +385,7 @@ def generate_federation_code(workspace_id: int, label: str | None = None) -> tup
         group_id=group.id,
         workspace_id=workspace_id,
         status="active",
-        role="creator",
+        role="owner",
         joined_at=now,
     )
     DbManager.create_record(member)
@@ -284,16 +394,28 @@ def generate_federation_code(workspace_id: int, label: str | None = None) -> tup
 
 
 def parse_federation_code(encoded: str) -> dict | None:
-    """Decode a federation connection payload.
+    """Decode and verify a federation connection payload.
 
     Returns ``{"code": ..., "webhook_url": ..., "instance_id": ...,
-    "public_key": ...}`` or *None* if the payload is invalid.
+    "public_key": ..., "sig": ...}`` or *None* if the payload is invalid,
+    unsigned, tampered, or the webhook URL fails SSRF checks.
     """
     try:
         decoded = base64.urlsafe_b64decode(encoded.encode()).decode()
         payload = json.loads(decoded)
-        if all(k in payload for k in ("code", "webhook_url", "instance_id")):
-            return payload
+        required = ("code", "webhook_url", "instance_id", "public_key", "sig")
+        if not all(k in payload and payload[k] for k in required):
+            return None
+        if not verify_body(_connection_payload_canonical(payload), payload["sig"], payload["public_key"]):
+            _logger.warning("federation_code_bad_signature")
+            return None
+        if not instance_id_matches_public_key(payload["instance_id"], payload["public_key"]):
+            _logger.warning("federation_code_instance_id_mismatch")
+            return None
+        if not validate_webhook_url(payload["webhook_url"]):
+            _logger.warning("federation_code_invalid_webhook")
+            return None
+        return payload
     except Exception as exc:
         _logger.debug(f"decode_federation_code: invalid payload: {exc}")
     return None
@@ -319,8 +441,15 @@ def get_or_create_federated_workspace(
         [schemas.FederatedWorkspace.instance_id == instance_id],
     )
     existing = matches[0] if matches else None
+    if existing is None:
+        by_key = DbManager.find_records(
+            schemas.FederatedWorkspace,
+            [schemas.FederatedWorkspace.public_key == public_key],
+        )
+        existing = by_key[0] if by_key else None
     if existing:
         update_fields = {
+            schemas.FederatedWorkspace.instance_id: instance_id,
             schemas.FederatedWorkspace.webhook_url: webhook_url,
             schemas.FederatedWorkspace.public_key: public_key,
             schemas.FederatedWorkspace.status: "active",
@@ -369,8 +498,10 @@ def _federation_request(
 ) -> dict | None:
     """Send an authenticated request to a federated workspace.
 
-    Signs the request with this instance's Ed25519 private key.
-    Retries up to :data:`_MAX_RETRIES` times on transient failures.
+    *path* is a resource subpath (for example ``/message``) appended to the
+    peer's advertised ``webhook_url``; this client does not assume the peer's
+    mount path. Signs the request with this instance's Ed25519 private key and
+    retries up to :data:`_MAX_RETRIES` times on transient failures.
     """
     url = fed_ws.webhook_url.rstrip("/") + path
     body = json.dumps(payload)
@@ -439,8 +570,6 @@ def _federation_request(
                 "federation_request_timeout",
                 extra={"url": url, "attempt": attempt + 1, "remote": fed_ws.instance_id},
             )
-            if attempt < _MAX_RETRIES - 1:
-                time.sleep(_RETRY_BACKOFF[attempt])
         except requests.exceptions.ConnectionError as e:
             _logger.warning(
                 "federation_connection_error",
@@ -465,27 +594,27 @@ def _federation_request(
 
 def push_message(fed_ws: schemas.FederatedWorkspace, payload: dict) -> dict | None:
     """Forward a message (new post, thread reply) to a federated workspace."""
-    return _federation_request(fed_ws, "/api/federation/message", payload)
+    return _federation_request(fed_ws, "/message", payload)
 
 
 def push_edit(fed_ws: schemas.FederatedWorkspace, payload: dict) -> dict | None:
     """Forward a message edit to a federated workspace."""
-    return _federation_request(fed_ws, "/api/federation/message/edit", payload)
+    return _federation_request(fed_ws, "/message/edit", payload)
 
 
 def push_delete(fed_ws: schemas.FederatedWorkspace, payload: dict) -> dict | None:
     """Forward a message deletion to a federated workspace."""
-    return _federation_request(fed_ws, "/api/federation/message/delete", payload)
+    return _federation_request(fed_ws, "/message/delete", payload)
 
 
 def push_reaction(fed_ws: schemas.FederatedWorkspace, payload: dict) -> dict | None:
     """Forward a reaction add/remove to a federated workspace."""
-    return _federation_request(fed_ws, "/api/federation/message/react", payload)
+    return _federation_request(fed_ws, "/message/react", payload)
 
 
 def push_users(fed_ws: schemas.FederatedWorkspace, payload: dict) -> dict | None:
     """Exchange user directory with a federated workspace."""
-    return _federation_request(fed_ws, "/api/federation/users", payload)
+    return _federation_request(fed_ws, "/users", payload)
 
 
 def initiate_federation_connect(
@@ -494,20 +623,32 @@ def initiate_federation_connect(
     *,
     team_id: str | None = None,
     workspace_name: str | None = None,
+    context: dict | None = None,
 ) -> dict | None:
-    """Call the remote instance's /api/federation/pair endpoint.
+    """Call the remote instance's pair endpoint.
 
-    Signs the request with this instance's Ed25519 private key so the
-    receiver can verify we control the keypair advertised in the connection code.
-    Optionally sends team_id and workspace_name so the remote (Instance A) can
-    tag the connection and soft-delete the matching local workspace.
+    *remote_url* is the ``webhook_url`` from the connection code — the peer's
+    full federation endpoint — and this appends ``/pair`` to it rather than
+    assuming a mount path. Signs the request with this instance's Ed25519
+    private key so the receiver can verify we control the keypair advertised in
+    the connection code. Optionally sends team_id and workspace_name so the
+    remote (Instance A) can tag the connection and soft-delete the matching
+    local workspace.
     """
+    endpoint = federation_endpoint_url(context)
+    if not endpoint:
+        _logger.error("federation_pair_no_public_url")
+        return None
+    if not validate_webhook_url(remote_url):
+        _logger.error("federation_pair_invalid_remote_url", extra={"url": remote_url})
+        return None
+
     _, public_key_pem = get_or_create_instance_keypair()
 
-    url = remote_url.rstrip("/") + "/api/federation/pair"
+    url = remote_url.rstrip("/") + "/pair"
     payload = {
         "code": code,
-        "webhook_url": get_public_url(),
+        "webhook_url": endpoint,
         "instance_id": get_instance_id(),
         "public_key": public_key_pem,
     }
@@ -561,29 +702,12 @@ def initiate_federation_connect(
                 "federation_pair_timeout",
                 extra={"url": url, "attempt": attempt + 1},
             )
-            if attempt < _MAX_RETRIES - 1:
-                time.sleep(_RETRY_BACKOFF[attempt])
         except Exception as e:
             _logger.error("federation_pair_error", extra={"url": url, "error": str(e)})
             return None
 
     _logger.error("federation_pair_exhausted", extra={"url": url, "attempts": _MAX_RETRIES})
     return None
-
-
-def ping_federated_workspace(fed_ws: schemas.FederatedWorkspace) -> bool:
-    """Check if a federated workspace is reachable."""
-    url = fed_ws.webhook_url.rstrip("/") + "/api/federation/ping"
-    try:
-        resp = requests.get(
-            url,
-            headers={"User-Agent": FEDERATION_USER_AGENT},
-            timeout=5,
-        )
-        return resp.status_code == 200
-    except Exception as exc:
-        _logger.debug(f"ping_federated_workspace: failed to reach {fed_ws.instance_id}: {exc}")
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -604,23 +728,30 @@ def build_message_payload(
     thread_post_id: str | None = None,
     images: list[dict] | None = None,
     timestamp: str | None = None,
+    user_id: str | None = None,
+    reply_broadcast: bool = False,
 ) -> dict:
     """Build a standardised federation message payload."""
-    return {
+    user_obj: dict = {
+        "display_name": user_name,
+        "avatar_url": user_avatar_url,
+        "workspace_name": workspace_name,
+    }
+    if user_id:
+        user_obj["user_id"] = user_id
+    payload = {
         "type": msg_type,
         "sync_id": sync_id,
         "post_id": post_id,
         "channel_id": channel_id,
-        "user": {
-            "display_name": user_name,
-            "avatar_url": user_avatar_url,
-            "workspace_name": workspace_name,
-        },
+        "user": user_obj,
         "text": text,
         "thread_post_id": thread_post_id,
         "images": images or [],
         "timestamp": timestamp,
+        "reply_broadcast": bool(reply_broadcast),
     }
+    return payload
 
 
 def build_edit_payload(
@@ -629,6 +760,7 @@ def build_edit_payload(
     channel_id: str,
     text: str,
     timestamp: str,
+    images: list[dict] | None = None,
 ) -> dict:
     """Build a federation edit payload."""
     return {
@@ -637,6 +769,7 @@ def build_edit_payload(
         "channel_id": channel_id,
         "text": text,
         "timestamp": timestamp,
+        "images": images or [],
     }
 
 
@@ -665,9 +798,10 @@ def build_reaction_payload(
     user_avatar_url: str | None = None,
     workspace_name: str | None = None,
     timestamp: str,
+    user_id: str | None = None,
 ) -> dict:
     """Build a federation reaction payload."""
-    return {
+    payload: dict = {
         "type": "react",
         "post_id": post_id,
         "channel_id": channel_id,
@@ -678,3 +812,6 @@ def build_reaction_payload(
         "workspace_name": workspace_name,
         "timestamp": timestamp,
     }
+    if user_id:
+        payload["user_id"] = user_id
+    return payload

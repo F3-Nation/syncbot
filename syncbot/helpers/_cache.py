@@ -4,11 +4,13 @@ Lambda containers are reused across invocations, so a short TTL cache
 avoids redundant DB queries for the same sync list within a warm container.
 """
 
+import contextvars
 import time as _time
 
 _CACHE: dict = {}
 _CACHE_TTL_SECONDS = 60
 _USER_INFO_CACHE_TTL = 300  # 5 min for user info lookups
+_REQUEST_CACHE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("syncbot_request_cache", default=None)
 
 
 def _cache_get(key: str):
@@ -43,3 +45,33 @@ def clear_all_caches() -> int:
     count = len(_CACHE)
     _CACHE.clear()
     return count
+
+
+def begin_request_scope() -> None:
+    """Start a per-request dict (mapping rows, user tokens, channel lookups)."""
+    _REQUEST_CACHE.set({})
+
+
+def clear_request_scope() -> None:
+    """Drop the current request-scope dict (tests and end-of-request)."""
+    _REQUEST_CACHE.set(None)
+
+
+def request_scope_get(key: str):
+    store = _REQUEST_CACHE.get()
+    if not store:
+        return None
+    return store.get(key)
+
+
+def request_scope_set(key: str, value) -> None:
+    store = _REQUEST_CACHE.get()
+    if store is None:
+        return
+    store[key] = value
+
+
+def request_scope_delete(key: str) -> None:
+    store = _REQUEST_CACHE.get()
+    if store:
+        store.pop(key, None)

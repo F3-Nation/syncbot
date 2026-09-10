@@ -1,0 +1,12 @@
+---
+description: AWS SAM / GCP Terraform conventions for SyncBot
+globs: infra/**/*
+alwaysApply: false
+---
+
+# Infra conventions
+
+- Keep AWS-specific resources and IAM under `infra/aws/`; GCP under `infra/gcp/`.
+- SAM templates should validate (`sam validate --lint`) before merging infra changes that touch `infra/aws/template*.yaml`.
+- Prefer parameterized scripts (`infra/*/scripts`, `deploy.sh`) over duplicating secrets or URLs in docs — docs should link to env contract (`docs/INFRA_CONTRACT.md`). `SyncbotPublicUrl` / `syncbot_public_url_override` are leftover and unused by the app.
+- Do not import application handlers from `infra/` Lambdas except via documented boundaries (the sqlite Litestream wrapper may call `initialize_database` / `app.handler`).

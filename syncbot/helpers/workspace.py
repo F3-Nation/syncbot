@@ -12,73 +12,25 @@ from helpers.encryption import decrypt_bot_token, encrypt_bot_token
 _logger = logging.getLogger(__name__)
 
 
-def get_sync_list(team_id: str, channel_id: str) -> list[tuple[schemas.SyncChannel, schemas.Workspace]]:
-    """Return every (SyncChannel, Workspace) pair that shares a sync with *channel_id*."""
-    cache_key = f"sync_list:{channel_id}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+def invalidate_fed_ws_for_sync_cache() -> None:
+    """Drop cached federation fan-out lookups after pair, unpair, or restore."""
+    from helpers._cache import _cache_delete_prefix
 
-    sync_channel_record = DbManager.find_records(
-        schemas.SyncChannel,
-        [
-            schemas.SyncChannel.channel_id == channel_id,
-            schemas.SyncChannel.deleted_at.is_(None),
-            schemas.SyncChannel.status == "active",
-        ],
-    )
-    if sync_channel_record:
-        sync_channels = DbManager.find_join_records2(
-            left_cls=schemas.SyncChannel,
-            right_cls=schemas.Workspace,
-            filters=[
-                schemas.SyncChannel.sync_id == sync_channel_record[0].sync_id,
-                schemas.SyncChannel.deleted_at.is_(None),
-                schemas.SyncChannel.status == "active",
-            ],
-        )
-    else:
-        sync_channels = []
-
-    # One logical target per (workspace, Slack channel): duplicate SyncChannel rows
-    # (e.g. double-submit on join/subscribe) would otherwise post the same message N times.
-    seen: set[tuple[int, str]] = set()
-    deduped: list[tuple[schemas.SyncChannel, schemas.Workspace]] = []
-    for sc, ws in sync_channels:
-        key = (ws.id, sc.channel_id)
-        if key not in seen:
-            seen.add(key)
-            deduped.append((sc, ws))
-    sync_channels = deduped
-
-    _cache_set(cache_key, sync_channels)
-    return sync_channels
-
-
-def get_federated_workspace(group_id: int, workspace_id: int) -> schemas.FederatedWorkspace | None:
-    """Return the federated workspace for a group membership, if one exists."""
-    members = DbManager.find_records(
-        schemas.WorkspaceGroupMember,
-        [
-            schemas.WorkspaceGroupMember.group_id == group_id,
-            schemas.WorkspaceGroupMember.workspace_id == workspace_id,
-            schemas.WorkspaceGroupMember.deleted_at.is_(None),
-        ],
-    )
-    if not members or not members[0].federated_workspace_id:
-        return None
-
-    fed_ws = DbManager.get_record(schemas.FederatedWorkspace, id=members[0].federated_workspace_id)
-    if not fed_ws or fed_ws.status != "active":
-        return None
-
-    return fed_ws
+    _cache_delete_prefix("fed_ws_for_sync:")
 
 
 def get_federated_workspace_for_sync(sync_id: int) -> schemas.FederatedWorkspace | None:
     """Return the federated workspace for a sync, checking group membership."""
+    from helpers._cache import _cache_get, _cache_set
+
+    cache_key = f"fed_ws_for_sync:{sync_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached or None
+
     sync = DbManager.get_record(schemas.Sync, id=sync_id)
     if not sync or not sync.group_id:
+        _cache_set(cache_key, False)
         return None
 
     fed_members = DbManager.find_records(
@@ -91,12 +43,15 @@ def get_federated_workspace_for_sync(sync_id: int) -> schemas.FederatedWorkspace
         ],
     )
     if not fed_members:
+        _cache_set(cache_key, False)
         return None
 
     fed_ws = DbManager.get_record(schemas.FederatedWorkspace, id=fed_members[0].federated_workspace_id)
     if not fed_ws or fed_ws.status != "active":
+        _cache_set(cache_key, False)
         return None
 
+    _cache_set(cache_key, fed_ws)
     return fed_ws
 
 
@@ -134,18 +89,24 @@ def _maybe_refresh_bot_token(workspace_record: schemas.Workspace, context: dict)
     if not new_token:
         return
 
+    try:
+        stored_plain = decrypt_bot_token(workspace_record.bot_token)
+    except ValueError:
+        stored_plain = None
+    if stored_plain == new_token:
+        return
+
     encrypted_new = encrypt_bot_token(new_token)
-    if encrypted_new != workspace_record.bot_token:
-        DbManager.update_records(
-            schemas.Workspace,
-            [schemas.Workspace.id == workspace_record.id],
-            {schemas.Workspace.bot_token: encrypted_new},
-        )
-        workspace_record.bot_token = encrypted_new
-        _logger.info(
-            "bot_token_refreshed",
-            extra={"workspace_id": workspace_record.id, "team_id": workspace_record.team_id},
-        )
+    DbManager.update_records(
+        schemas.Workspace,
+        [schemas.Workspace.id == workspace_record.id],
+        {schemas.Workspace.bot_token: encrypted_new},
+    )
+    workspace_record.bot_token = encrypted_new
+    _logger.info(
+        "bot_token_refreshed",
+        extra={"workspace_id": workspace_record.id, "team_id": workspace_record.team_id},
+    )
 
 
 def _maybe_refresh_workspace_name(workspace_record: schemas.Workspace, client: WebClient) -> None:
@@ -260,10 +221,12 @@ def _restore_workspace(
                 notify_admins_dm(
                     member_client,
                     f":arrow_forward: *{ws_name}* has been restored. Group syncing will resume.",
+                    team_id=member_ws.team_id,
                 )
 
                 syncs_in_group = DbManager.find_records(
-                    schemas.Sync, [schemas.Sync.group_id == group_id],
+                    schemas.Sync,
+                    [schemas.Sync.group_id == group_id],
                 )
                 other_channel_ids = []
                 for sync in syncs_in_group:
@@ -383,17 +346,8 @@ def resolve_channel_name(channel_id: str, workspace=None) -> str:
     if cached:
         return cached
 
-    ch_name = channel_id
-    ws_name = None
-
-    if workspace and hasattr(workspace, "bot_token") and workspace.bot_token:
-        ws_name = getattr(workspace, "workspace_name", None)
-        try:
-            ws_client = WebClient(token=decrypt_bot_token(workspace.bot_token))
-            info = ws_client.conversations_info(channel=channel_id)
-            ch_name = safe_get(info, "channel", "name") or channel_id
-        except Exception as exc:
-            _logger.debug(f"resolve_channel_name: conversations_info failed for {channel_id}: {exc}")
+    ch_name, _is_private = lookup_channel_meta(channel_id, workspace)
+    ws_name = getattr(workspace, "workspace_name", None) if workspace else None
 
     if ws_name:
         result = f"#{ch_name} ({ws_name})"
@@ -403,3 +357,66 @@ def resolve_channel_name(channel_id: str, workspace=None) -> str:
     if ch_name != channel_id:
         _cache_set(cache_key, result, ttl=3600)
     return result
+
+
+def lookup_channel_meta(
+    channel_id: str,
+    workspace=None,
+    *,
+    user_token: str | None = None,
+    client: WebClient | None = None,
+) -> tuple[str, bool]:
+    """Return ``(name, is_private)`` for a Slack channel.
+
+    Tries *client* (the request bot), then the workspace bot token, then
+    *user_token*. The bot cannot see a private Channel it has not joined yet,
+    which is why publish used to store the Channel ID as ``sync.title``.
+    Never log *user_token*.
+    """
+    if not channel_id:
+        return channel_id, False
+
+    from helpers._cache import request_scope_get, request_scope_set
+
+    req_key = f"chan_meta:{channel_id}"
+    cached_req = request_scope_get(req_key)
+    if isinstance(cached_req, tuple) and len(cached_req) == 2:
+        return str(cached_req[0]), bool(cached_req[1])
+
+    cache_key = f"chan_meta:{channel_id}"
+    cached = _cache_get(cache_key)
+    if isinstance(cached, tuple) and len(cached) == 2:
+        request_scope_set(req_key, cached)
+        return str(cached[0]), bool(cached[1])
+
+    clients: list[WebClient] = []
+    if client is not None:
+        clients.append(client)
+    if workspace and getattr(workspace, "bot_token", None):
+        try:
+            clients.append(WebClient(token=decrypt_bot_token(workspace.bot_token)))
+        except Exception as exc:
+            _logger.debug(f"lookup_channel_meta: bot token unusable for {channel_id}: {exc}")
+    if user_token:
+        clients.append(WebClient(token=user_token))
+
+    name, is_private = channel_id, False
+    for slack_client in clients:
+        try:
+            info = slack_client.conversations_info(channel=channel_id)
+            channel = safe_get(info, "channel") or {}
+            found = channel.get("name")
+            if found:
+                name = str(found)
+                is_private = bool(channel.get("is_private"))
+                break
+        except Exception as exc:
+            _logger.debug(f"lookup_channel_meta: conversations_info failed for {channel_id}: {exc}")
+
+    # Always memoize in request scope (including misses) so publish/Home does not
+    # re-hit Slack for the same unknown private channel. Process cache stays
+    # success-only so a later join can resolve the name.
+    request_scope_set(req_key, (name, is_private))
+    if name != channel_id:
+        _cache_set(cache_key, (name, is_private), ttl=3600)
+    return name, is_private

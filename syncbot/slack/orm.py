@@ -3,9 +3,70 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from helpers import safe_get
+from helpers import format_error_dm, get_user_id_from_body, safe_get
+from helpers.slack_api import slack_error_code as _slack_error_code
 
 logger = logging.getLogger(__name__)
+
+_MODAL_EXPIRED_TRIGGER_DM = "SyncBot could not open that window in time. Please click the button again."
+
+
+def _notify_expired_trigger(
+    client: Any,
+    exc: BaseException,
+    body: dict | None,
+    *,
+    callback_id: str | None,
+    mode: str,
+) -> None:
+    """DM the acting user when ``views.open`` lost the 3s trigger_id window."""
+    code = _slack_error_code(exc)
+    if code != "expired_trigger_id" and "expired_trigger_id" not in str(exc):
+        return
+    user_id = get_user_id_from_body(body) if body else None
+    if not user_id:
+        return
+    action_id = safe_get(body, "actions", 0, "action_id") if body else None
+    text = format_error_dm(
+        _MODAL_EXPIRED_TRIGGER_DM,
+        {
+            "error": code or "expired_trigger_id",
+            "window": callback_id,
+            "open": "push" if mode == "add" else "open",
+            "button": action_id,
+        },
+    )
+    try:
+        client.chat_postMessage(channel=user_id, text=text)
+    except Exception as dm_exc:
+        logger.warning("modal_open_timeout_dm_failed", extra={"error": str(dm_exc)})
+
+
+def open_or_push_view(
+    client: Any,
+    trigger_id: str,
+    view: dict,
+    *,
+    new_or_add: str = "new",
+    body: dict | None = None,
+) -> Any | None:
+    """Open or push a Slack modal, logging and DMing on ``expired_trigger_id``.
+
+    Returns the Slack API response on success, or ``None`` on failure.
+    """
+    callback_id = view.get("callback_id") if isinstance(view, dict) else None
+    try:
+        if new_or_add == "add":
+            return client.views_push(trigger_id=trigger_id, view=view)
+        return client.views_open(trigger_id=trigger_id, view=view)
+    except Exception as e:
+        logger.error(
+            "modal_open_or_push_failed",
+            extra={"callback_id": callback_id, "mode": new_or_add, "error": str(e)},
+        )
+        logger.debug("modal_view_payload", extra={"view": json.dumps(view, indent=2)})
+        _notify_expired_trigger(client, e, body, callback_id=callback_id, mode=new_or_add)
+        return None
 
 
 @dataclass
@@ -208,6 +269,39 @@ class RadioButtonsElement(BaseElement):
 
 
 @dataclass
+class MultiStaticSelectElement(BaseElement):
+    """Multi-select over a fixed option list, for picking several values at once."""
+
+    initial_values: list[str] = None
+    options: list[SelectorOption] = None
+
+    def get_selected_value(self, input_data, action):
+        selected = safe_get(input_data, action, action, "selected_options") or []
+        return [option.get("value") for option in selected if option.get("value")]
+
+    def as_form_field(self, action: str):
+        if not self.options:
+            self.options = as_selector_options(["Default"])
+
+        option_elements = [self.__make_option(o) for o in self.options]
+        j = {"type": "multi_static_select", "options": option_elements, "action_id": action}
+        if self.placeholder:
+            j.update(self.make_placeholder_field())
+
+        if self.initial_values:
+            initial = [x for x in option_elements if x["value"] in self.initial_values]
+            if initial:
+                j["initial_options"] = initial
+        return j
+
+    def __make_option(self, option: SelectorOption):
+        return {
+            "text": {"type": "plain_text", "text": option.name, "emoji": True},
+            "value": option.value,
+        }
+
+
+@dataclass
 class PlainTextInputElement(BaseElement):
     initial_value: str = None
     multiline: bool = False
@@ -277,9 +371,20 @@ class ChannelsSelectElement(BaseElement):
 
 @dataclass
 class ConversationsSelectElement(BaseElement):
-    """Channel picker that includes both public and private channels."""
+    """Slack's native channel picker, searchable over all of the user's conversations.
+
+    Unlike a ``static_select`` populated from ``conversations_list``, this has no
+    app-side enumeration and therefore no option cap, so it works in workspaces
+    with thousands of channels.
+
+    ``include_private`` only controls the client-side filter, which is advisory:
+    the payload can still name a private channel, so callers must also validate
+    on submit. It defaults to ``False`` to match the default of the
+    ``allow_private_channels`` setting; set it from that setting at render time.
+    """
 
     initial_value: str = None
+    include_private: bool = False
 
     def get_selected_value(self, input_data, action):
         return safe_get(input_data, action, action, "selected_conversation")
@@ -289,7 +394,7 @@ class ConversationsSelectElement(BaseElement):
             "type": "conversations_select",
             "action_id": action,
             "filter": {
-                "include": ["public", "private"],
+                "include": ["public", "private"] if self.include_private else ["public"],
                 "exclude_bot_users": True,
                 "exclude_external_shared_channels": True,
             },
@@ -482,6 +587,18 @@ class BlockView:
             if block.action in options:
                 block.element.options = options[block.action]
 
+    def set_conversations_include_private(self, include_private: bool):
+        """Apply the private-channel policy to every conversations picker in this view.
+
+        The form templates in :mod:`slack.forms` are module-level constants, so the
+        policy cannot be baked into them at import time — it would go stale as soon
+        as an operator changed the setting. Call this on the deep copy instead.
+        """
+        for block in self.blocks:
+            element = getattr(block, "element", None)
+            if isinstance(element, ConversationsSelectElement):
+                element.include_private = include_private
+
     def as_form_field(self) -> list[dict]:
         return [b.as_form_field() for b in self.blocks]
 
@@ -509,7 +626,9 @@ class BlockView:
         close_button_text: str = "Close",
         notify_on_close: bool = False,
         new_or_add: str = "new",
-    ):
+        body: dict | None = None,
+    ) -> Any | None:
+        """Open or push this form as a modal. Returns the Slack API response or ``None``."""
         blocks = self.as_form_field()
 
         view = {
@@ -526,17 +645,7 @@ class BlockView:
         if submit_button_text:
             view["submit"] = {"type": "plain_text", "text": submit_button_text}
 
-        try:
-            if new_or_add == "new":
-                client.views_open(trigger_id=trigger_id, view=view)
-            elif new_or_add == "add":
-                client.views_push(trigger_id=trigger_id, view=view)
-        except Exception as e:
-            logger.error(
-                "modal_open_or_push_failed",
-                extra={"callback_id": callback_id, "mode": new_or_add, "error": str(e)},
-            )
-            logger.debug("modal_view_payload", extra={"view": json.dumps(view, indent=2)})
+        return open_or_push_view(client, trigger_id, view, new_or_add=new_or_add, body=body)
 
     def publish_home_tab(self, client: Any, user_id: str):
         """Publish a Home tab view for the given user."""

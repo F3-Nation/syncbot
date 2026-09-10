@@ -1,0 +1,10 @@
+# Litestream replica for the Lambda SQLite file (sqlite mode only).
+# Lambda must set LITESTREAM_S3_BUCKET. AWS_REGION is provided by the runtime.
+dbs:
+  - path: /tmp/syncbot.db
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_S3_BUCKET}
+        path: syncbot.db
+        region: ${AWS_REGION}
+        sync-interval: 1s

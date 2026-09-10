@@ -1,0 +1,22 @@
+# Mirrors CI/Python setup so Copilot (and humans) can reuse the same install path.
+# Run manually to verify the environment matches `.github/workflows/ci.yml`.
+name: Copilot setup check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  poetry-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies (same pattern as CI)
+        run: |
+          python -m pip install --upgrade pip
+          pip install poetry
+          poetry install --with dev
+      - name: Quick sanity
+        run: poetry run python -c "import slack_bolt; print('ok')"

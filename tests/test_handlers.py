@@ -1,7 +1,7 @@
 """Unit tests for handler parsing and dispatch helpers."""
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 os.environ.setdefault("DATABASE_HOST", "localhost")
 os.environ.setdefault("DATABASE_USER", "root")
@@ -15,7 +15,7 @@ from handlers import (
     _parse_event_fields,
     _sanitize_text,
 )
-from handlers.groups import _generate_invite_code
+from handlers.group import _generate_invite_code
 
 # -----------------------------------------------------------------------
 # _parse_event_fields
@@ -50,6 +50,25 @@ class TestParseEventFields:
         assert ctx["user_id"] == "U001"
         assert ctx["msg_text"] == "Hello world"
         assert ctx["event_subtype"] is None
+        assert ctx["reply_broadcast"] is False
+
+    def test_thread_broadcast_sets_reply_broadcast(self):
+        body = {
+            "team_id": "T001",
+            "event": {
+                "type": "message",
+                "subtype": "thread_broadcast",
+                "channel": "C001",
+                "user": "U001",
+                "text": "Also send to channel",
+                "ts": "1234567890.000002",
+                "thread_ts": "1234567890.000001",
+            },
+        }
+        ctx = _parse_event_fields(body, self._make_client())
+        assert ctx["event_subtype"] == "thread_broadcast"
+        assert ctx["reply_broadcast"] is True
+        assert ctx["thread_ts"] == "1234567890.000001"
 
     def test_empty_text_defaults_to_space(self):
         body = {
@@ -116,6 +135,8 @@ class TestEventContextType:
             thread_ts=None,
             ts="123.456",
             event_subtype=None,
+            reply_broadcast=False,
+            content_blocks=[],
         )
         assert isinstance(ctx, dict)
         assert ctx["team_id"] == "T1"
@@ -307,41 +328,14 @@ class TestRequestTypeGroupPrefix:
         assert req_type == "block_actions"
         assert req_id == actions.CONFIG_LEAVE_GROUP
 
+    def test_join_sync_picker_does_not_collapse_onto_join_sync(self):
+        from helpers import get_request_type
+        from slack import actions
 
-# -----------------------------------------------------------------------
-# handle_new_sync_submission (unit-level: verifies the handler wiring)
-# -----------------------------------------------------------------------
-
-
-class TestNewSyncSubmission:
-    """Verify that handle_new_sync_submission uses conversations.info to get the channel name."""
-
-    def test_rejects_unauthorized_user(self):
-        from handlers import handle_new_sync_submission
-
-        client = MagicMock()
-        client.users_info.return_value = {"user": {"is_admin": False, "is_owner": False}}
-        body = {"view": {"team_id": "T001"}, "user": {"id": "U001"}}
-        logger = MagicMock()
-
-        with patch("handlers.sync.helpers.is_user_authorized", return_value=False):
-            handle_new_sync_submission(body, client, logger, {})
-
-        client.conversations_info.assert_not_called()
-        client.conversations_join.assert_not_called()
-
-    def test_rejects_missing_channel_id(self):
-        from handlers import handle_new_sync_submission
-
-        client = MagicMock()
-        body = {"view": {"team_id": "T001"}, "user": {"id": "U001"}}
-        logger = MagicMock()
-
-        with (
-            patch("handlers.sync.helpers.is_user_authorized", return_value=True),
-            patch("handlers.sync.forms.NEW_SYNC_FORM") as mock_form,
-        ):
-            mock_form.get_selected_values.return_value = {}
-            handle_new_sync_submission(body, client, logger, {})
-
-        client.conversations_info.assert_not_called()
+        body = {
+            "type": "block_actions",
+            "actions": [{"action_id": actions.CONFIG_JOIN_SYNC_SELECT}],
+        }
+        req_type, req_id = get_request_type(body)
+        assert req_type == "block_actions"
+        assert req_id == actions.CONFIG_JOIN_SYNC_SELECT

@@ -1,0 +1,25 @@
+{# Shared Keep a Changelog helpers. PSR parser type names vary by case. #}
+
+{% macro kac_heading(type_) %}
+{%- set headings = {
+  "features": "Added",
+  "feature": "Added",
+  "feat": "Added",
+  "added": "Added",
+  "bug fixes": "Fixed",
+  "bug fix": "Fixed",
+  "fix": "Fixed",
+  "fixed": "Fixed",
+  "performance improvements": "Changed",
+  "performance improvement": "Changed",
+  "perf": "Changed",
+  "changed": "Changed",
+} -%}
+{%- set key = type_ | string | trim | lower -%}
+{%- if key in headings -%}{{ headings[key] }}{%- endif -%}
+{% endmacro %}
+
+{% macro kac_bullet(text) %}
+{%- set summary = text | trim -%}
+{%- if summary -%}- {{ summary[:1] | upper }}{{ summary[1:] }}{%- endif -%}
+{% endmacro %}

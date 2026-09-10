@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from slack_sdk import WebClient
 from sqlalchemy.exc import ProgrammingError
 
-import constants
 from db import DbManager, schemas
 from helpers._cache import _cache_get, _cache_set
 from helpers.core import safe_get
@@ -24,14 +23,23 @@ def get_admin_ids(
     """Return a list of admin/owner user IDs for the workspace behind *client*.
 
     If *context* and *team_id* are provided, uses request-scoped cache to avoid
-    repeated users.list for the same workspace within one request.
+    repeated users.list for the same workspace within one request. A 60s process
+    cache keyed by *team_id* covers subsequent requests on a warm container.
     """
     if context is not None and team_id:
         cache = context.setdefault("_admin_ids", {})
         if team_id in cache:
             return cache[team_id]
 
-    from helpers.user_matching import _users_list_page
+    cache_key = f"admin_ids:{team_id}" if team_id else None
+    if cache_key:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            if context is not None and team_id:
+                context.setdefault("_admin_ids", {})[team_id] = cached
+            return cached
+
+    from helpers.user_map import _users_list_page
 
     cursor = ""
     admin_ids: list[str] = []
@@ -59,7 +67,25 @@ def get_admin_ids(
 
     if context is not None and team_id:
         context.setdefault("_admin_ids", {})[team_id] = admin_ids
+    if cache_key:
+        _cache_set(cache_key, admin_ids)
     return admin_ids
+
+
+def get_manager_ids(
+    client: WebClient,
+    *,
+    team_id: str | None = None,
+    context: dict | None = None,
+) -> list[str]:
+    """Return Slack admin/owner IDs plus extra managers for *team_id*."""
+    from helpers.workspace_settings import extra_manager_user_ids
+
+    admin_ids = get_admin_ids(client, team_id=team_id, context=context)
+    if not team_id:
+        return admin_ids
+    merged = sorted(set(admin_ids) | set(extra_manager_user_ids(team_id)))
+    return merged
 
 
 def notify_admins_dm(
@@ -67,16 +93,26 @@ def notify_admins_dm(
     message: str,
     exclude_user_ids: set[str] | None = None,
     blocks: list[dict] | None = None,
+    *,
+    include_managers: bool = True,
+    team_id: str | None = None,
+    context: dict | None = None,
 ) -> int:
-    """Send a DM to all workspace admins/owners.  Best-effort.
+    """Send a DM to workspace admins/owners and extra managers.
 
-    Returns the number of admins successfully notified.
+    Extra managers are included because these DMs are operational (sync failures,
+    group changes). Settings / Backup / Reset do not use this helper.
     """
     notified = 0
     kwargs: dict = {"text": message}
     if blocks:
         kwargs["blocks"] = blocks
-    for user_id in get_admin_ids(client):
+    user_ids = (
+        get_manager_ids(client, team_id=team_id, context=context)
+        if include_managers
+        else get_admin_ids(client, team_id=team_id, context=context)
+    )
+    for user_id in user_ids:
         if exclude_user_ids and user_id in exclude_user_ids:
             continue
         try:
@@ -95,14 +131,13 @@ def notify_admins_dm_blocks(
     client: WebClient,
     text: str,
     blocks: list[dict],
+    *,
+    team_id: str | None = None,
+    context: dict | None = None,
 ) -> list[dict]:
-    """Send a Block Kit DM to all workspace admins/owners.
-
-    Returns a list of ``{"channel": ..., "ts": ...}`` dicts for each
-    successfully sent DM (used for later message updates).
-    """
+    """Send a Block Kit DM to workspace admins/owners and extra managers."""
     sent: list[dict] = []
-    for user_id in get_admin_ids(client):
+    for user_id in get_manager_ids(client, team_id=team_id, context=context):
         try:
             dm = client.conversations_open(users=[user_id])
             channel_id = safe_get(dm, "channel", "id")
@@ -162,7 +197,9 @@ def purge_stale_soft_deletes() -> int:
         return 0
     _cache_set(cache_key, True, ttl=86400)
 
-    retention_days = constants.SOFT_DELETE_RETENTION_DAYS
+    from helpers.settings import soft_delete_retention_days
+
+    retention_days = soft_delete_retention_days()
     cutoff = datetime.now(UTC) - __import__("datetime").timedelta(days=retention_days)
 
     try:
@@ -213,11 +250,25 @@ def purge_stale_soft_deletes() -> int:
                         member_client,
                         f":wastebasket: *{ws_name}* has been permanently removed "
                         f"after {retention_days} days of inactivity.",
+                        team_id=member_ws.team_id,
                     )
                 except Exception as e:
                     _logger.warning(f"purge: failed to notify member {member.workspace_id}: {e}")
 
-        DbManager.delete_records(schemas.Workspace, [schemas.Workspace.id == ws.id])
+        # purge_workspace, not a bare Workspace delete: seven foreign keys across
+        # six tables still reference this row, so a parent-first delete fails on
+        # MySQL with error 1451 and the retention purge silently stops working.
+        from helpers.sync_cleanup import purge_workspace
+
+        try:
+            purge_workspace(ws.id)
+        except Exception as e:
+            _logger.error(
+                "purge_workspace_failed",
+                extra={"workspace_id": ws.id, "error": str(e)},
+            )
+            continue
+
         purged += 1
 
     if purged:

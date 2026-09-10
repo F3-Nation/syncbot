@@ -1,6 +1,6 @@
 # Pre-commit hooks for SyncBot
 #
-# Install:  pip install pre-commit && pre-commit install
+# Install:  pip install pre-commit && pre-commit install && pre-commit install --hook-type commit-msg
 # Run all:  pre-commit run --all-files
 #
 # See https://pre-commit.com for more information.
@@ -12,6 +12,7 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        exclude: '^infra/aws/template.*\.ya?ml$'
       - id: check-added-large-files
         args: ["--maxkb=500"]
       - id: check-merge-conflict
@@ -24,10 +25,16 @@ repos:
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
 
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.0.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+
   - repo: local
     hooks:
       - id: sync-requirements
-        name: Sync requirements.txt with poetry.lock
+        name: Sync requirements.txt files with poetry.lock
         entry: bash -c 'poetry export -f requirements.txt --without-hashes -o syncbot/requirements.txt && git add syncbot/requirements.txt'
         language: system
         files: ^poetry\.lock$

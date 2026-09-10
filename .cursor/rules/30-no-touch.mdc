@@ -1,0 +1,13 @@
+---
+description: Files automated tooling owns — do not edit casually
+alwaysApply: true
+---
+
+# Do not hand-edit (normal PRs)
+
+- **`CHANGELOG.md`** — do not bump `pyproject.toml` `version` or add a `## [X.Y.Z]` heading in a feature PR. Notes go under `## [Unreleased]` below `<!-- version list -->`; the release job retitles that heading to the version and date. If Unreleased is missing, python-semantic-release still inserts from `feat` / `fix` / `perf` unless that version heading is already present. Polishing an already-released heading is OK. Match **1.2.0** length: one short line per bullet (see `.cursor/rules/50-changelog.mdc`).
+- **`pyproject.toml` `version`** — bumped only by the release workflow / semantic-release.
+- **`syncbot/requirements.txt`** — generated via `poetry export` / pre-commit hook from `pyproject.toml`.
+- **Secrets** — never commit `.env`, `.env.deploy.*` with real values; only `*.example` templates belong in git.
+
+If you must fix a release tooling bug, change config/workflows/docs — not fake “manual” version bumps in the files above.

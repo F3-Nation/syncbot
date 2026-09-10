@@ -5,7 +5,6 @@ import logging
 import os
 import re
 import time as _time
-import uuid
 from logging import Logger
 
 import requests
@@ -60,44 +59,24 @@ def _download_to_file(url: str, file_path: str, headers: dict | None = None) -> 
         raise
 
 
-def download_public_file(url: str, logger: Logger) -> dict | None:
-    """Download a file from a public URL (e.g. GIPHY) to /tmp."""
-    try:
-        content_type = "image/gif"
-        file_name = f"attachment_{uuid.uuid4().hex[:8]}.gif"
-        file_path = f"/tmp/{file_name}"
+def download_slack_files(files: list[dict], client: WebClient, logger: Logger) -> list[dict]:
+    """Download files from Slack to /tmp for direct re-upload.
 
-        with requests.get(url, timeout=_DOWNLOAD_TIMEOUT, stream=True) as r:
-            r.raise_for_status()
-            content_type = r.headers.get("content-type", "image/gif").split(";")[0]
-            ext = content_type.split("/")[-1] if "/" in content_type else "gif"
-            file_name = f"attachment_{uuid.uuid4().hex[:8]}.{ext}"
-            file_path = f"/tmp/{file_name}"
-            written = 0
-            with open(file_path, "wb") as fh:
-                for chunk in r.iter_content(chunk_size=_STREAM_CHUNK):
-                    written += len(chunk)
-                    if written > _MAX_FILE_BYTES:
-                        raise ValueError(f"File exceeds {_MAX_FILE_BYTES} byte limit")
-                    fh.write(chunk)
-
-        return {"path": file_path, "name": file_name, "mimetype": content_type}
-    except Exception as e:
-        logger.warning(f"download_public_file: failed for {url}: {e}")
-        return None
-
-
-def download_slack_files(
-    files: list[dict], client: WebClient, logger: Logger
-) -> list[dict]:
-    """Download files from Slack to /tmp for direct re-upload."""
+    Skips stubs that have no private URL (tombstones, access-restricted, and
+    external files without ``url_private``). Keeps Slack's original ``name`` so
+    ``files_upload_v2`` can infer type from the extension.
+    """
     downloaded: list[dict] = []
     auth_headers = {"Authorization": f"Bearer {client.token}"}
+    skip_modes = frozenset({"file_access", "tombstone", "hidden_by_limit"})
 
     for f in files:
         try:
             url = f.get("url_private")
+            mode = f.get("mode")
             if not url:
+                continue
+            if mode in skip_modes:
                 continue
 
             safe_id, safe_ext, default_name = _safe_file_parts(f)
@@ -106,11 +85,13 @@ def download_slack_files(
 
             _download_to_file(url, file_path, headers=auth_headers)
 
-            downloaded.append({
-                "path": file_path,
-                "name": file_name,
-                "mimetype": f.get("mimetype", "application/octet-stream"),
-            })
+            downloaded.append(
+                {
+                    "path": file_path,
+                    "name": file_name,
+                    "mimetype": f.get("mimetype", "application/octet-stream"),
+                }
+            )
         except Exception as e:
             logger.error(f"download_slack_files: failed for {f.get('id')}: {e}")
     return downloaded
@@ -122,18 +103,27 @@ def upload_files_to_slack(
     files: list[dict],
     initial_comment: str | None = None,
     thread_ts: str | None = None,
+    reply_broadcast: bool = False,
 ) -> tuple[dict | None, str | None]:
-    """Upload one or more local files directly to a Slack channel."""
+    """Upload one or more local files directly to a Slack channel.
+
+    ``files.completeUploadExternal`` / ``files_upload_v2`` do not support
+    ``reply_broadcast``. When broadcasting is requested for a thread upload,
+    we upload first, then ``chat.update`` the share message with
+    ``reply_broadcast=True`` (Slack's supported path for also-send-to-channel).
+    """
     if not files:
         return None, None
 
     slack_client = WebClient(bot_token)
     file_uploads = []
     for f in files:
-        file_uploads.append({
-            "file": f["path"],
-            "filename": f["name"],
-        })
+        file_uploads.append(
+            {
+                "file": f["path"],
+                "filename": f["name"],
+            }
+        )
 
     kwargs: dict = {"channel": channel_id}
     if initial_comment:
@@ -151,14 +141,30 @@ def upload_files_to_slack(
             res = slack_client.files_upload_v2(**kwargs)
 
         msg_ts = _extract_file_message_ts(slack_client, res, channel_id, thread_ts=thread_ts)
+        if reply_broadcast and thread_ts and msg_ts:
+            _broadcast_thread_file_share(slack_client, channel_id, msg_ts)
         return res, msg_ts
     except Exception as e:
         _logger.warning(f"upload_files_to_slack: failed for channel {channel_id}: {e}")
         return None, None
 
 
+def _broadcast_thread_file_share(client: WebClient, channel_id: str, message_ts: str) -> None:
+    """Also-send an existing thread file share to the channel via chat.update."""
+    try:
+        # Omit text/blocks so Slack only flips reply_broadcast (no content rewrite).
+        client.chat_update(channel=channel_id, ts=message_ts, reply_broadcast=True)
+    except Exception as e:
+        _logger.warning(
+            "upload_files_to_slack: reply_broadcast via chat.update failed",
+            extra={"channel_id": channel_id, "ts": message_ts, "error": str(e)},
+        )
+
+
 def _extract_file_message_ts(
-    client: WebClient, upload_response, channel_id: str,
+    client: WebClient,
+    upload_response,
+    channel_id: str,
     thread_ts: str | None = None,
 ) -> str | None:
     """Extract the message ts created by a file upload."""
@@ -187,10 +193,26 @@ def _extract_file_message_ts(
             shares = info_resp["file"]["shares"]
             for share_type in ("public", "private"):
                 channel_shares = shares.get(share_type, {}).get(channel_id, [])
-                if channel_shares:
-                    ts = channel_shares[0].get("ts")
-                    _logger.info("_extract_file_message_ts: success",
-                                 extra={"file_id": file_id, "ts": ts, "attempt": attempt})
+                if not channel_shares:
+                    continue
+                if thread_ts:
+                    for share in channel_shares:
+                        if str(share.get("ts") or "") == str(thread_ts) or str(share.get("thread_ts") or "") == str(
+                            thread_ts
+                        ):
+                            ts = share.get("ts")
+                            if ts:
+                                _logger.info(
+                                    "_extract_file_message_ts: success",
+                                    extra={"file_id": file_id, "ts": ts, "attempt": attempt},
+                                )
+                                return ts
+                ts = channel_shares[0].get("ts")
+                if ts:
+                    _logger.info(
+                        "_extract_file_message_ts: success",
+                        extra={"file_id": file_id, "ts": ts, "attempt": attempt},
+                    )
                     return ts
         except (KeyError, TypeError, IndexError):
             pass

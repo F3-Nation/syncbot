@@ -1,9 +1,7 @@
-# Deploy SyncBot to AWS (SAM). See docs/DEPLOYMENT.md and docs/INFRA_CONTRACT.md.
-# To use GCP instead: set repository variable DEPLOY_TARGET=gcp and disable this workflow.
+# Deploy SyncBot to AWS (SAM). See docs/DEPLOY.md and docs/INFRA_CONTRACT.md.
+# To use GCP instead: set repository variable GITHUB_DEPLOY_TARGET=gcp and disable this workflow.
 #
-# Token key policy: Non-local deploys require a secure TOKEN_ENCRYPTION_KEY. The AWS app stack
-# auto-generates it in Secrets Manager by default. Back up the generated key after first deploy.
-# Optional disaster recovery secret TOKEN_ENCRYPTION_KEY_OVERRIDE passes TokenEncryptionKeyOverride for restore.
+# Secrets are passed as SAM parameters with NoEcho.
 
 name: Deploy (AWS)
 
@@ -12,15 +10,28 @@ on:
     branches:
       - test
       - prod
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - test
+          - prod
+
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   id-token: write
   contents: read
 
-# Skip when using GCP (set DEPLOY_TARGET=gcp to use deploy-gcp.yml instead)
+# Skip when using GCP (set GITHUB_DEPLOY_TARGET=gcp to use deploy-gcp.yml instead)
 jobs:
   sam-build:
-    if: vars.DEPLOY_TARGET != 'gcp'
+    if: (vars.GITHUB_DEPLOY_TARGET || vars.DEPLOY_TARGET) != 'gcp'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -30,6 +41,7 @@ jobs:
       - uses: aws-actions/setup-sam@v2
         with:
           use-installer: true
+          version: "1.165.0"
 
       - name: Validate SAM templates (cfn-lint)
         run: |
@@ -41,26 +53,24 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - run: sam build -t infra/aws/template.yaml
-
-      - name: Security audit Python dependencies
-        run: |
-          python -m pip install --upgrade pip pip-audit
-          pip-audit -r syncbot/requirements.txt
-          pip-audit -r infra/aws/db_setup/requirements.txt
+      - run: sam build -t infra/aws/template.yaml --build-in-source
 
       - name: Publish artifact
         uses: actions/upload-artifact@v7
         with:
           name: build-artifact
-          path: './.aws-sam/build'
+          path: |
+            ./.aws-sam/build
+            ./infra/aws/template.bootstrap.yaml
 
   sam-deploy-test:
-    if: github.ref == 'refs/heads/test'
+    if: (github.ref == 'refs/heads/test') || (github.event.inputs.environment == 'test')
     runs-on: ubuntu-latest
     environment: test
     needs: sam-build
     steps:
+      - uses: actions/checkout@v6
+
       - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
@@ -70,59 +80,79 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: build-artifact
-          path: './.aws-sam/build'
+          path: '.'
 
       - uses: aws-actions/setup-sam@v2
         with:
           use-installer: true
+          version: "1.165.0"
+
+      - name: Ensure bootstrap stack
+        env:
+          AWS_BOOTSTRAP_STACK_NAME: ${{ vars.AWS_BOOTSTRAP_STACK_NAME || vars.BOOTSTRAP_STACK_NAME || 'syncbot-bootstrap' }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: bash infra/aws/scripts/ensure_bootstrap.sh
 
       - name: Deploy to test
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET }}
+          AWS_STACK_NAME: ${{ vars.AWS_STACK_NAME || 'syncbot-test' }}
+          AWS_BOOTSTRAP_STACK_NAME: ${{ vars.AWS_BOOTSTRAP_STACK_NAME || vars.BOOTSTRAP_STACK_NAME || 'syncbot-bootstrap' }}
+          STAGE_NAME: test
+          DATABASE_BACKEND: ${{ vars.DATABASE_BACKEND }}
+          AWS_DATABASE_MODE: ${{ vars.AWS_DATABASE_MODE }}
+          ENABLE_KEEP_WARM: ${{ vars.ENABLE_KEEP_WARM || 'true' }}
+          DATABASE_ENGINE: ${{ vars.DATABASE_ENGINE }}
+          DATA_ENCRYPTION_KEY: ${{ secrets.DATA_ENCRYPTION_KEY }}
+          DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+          DATABASE_USER: ${{ vars.DATABASE_USER }}
+          DATABASE_HOST: ${{ vars.DATABASE_HOST }}
+          DATABASE_PORT: ${{ vars.DATABASE_PORT }}
+          DATABASE_SCHEMA: ${{ vars.DATABASE_SCHEMA }}
+          DATABASE_TLS_ENABLED: ${{ vars.DATABASE_TLS_ENABLED }}
+          DATABASE_SSL_CA_PATH: ${{ vars.DATABASE_SSL_CA_PATH }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+          PRIMARY_WORKSPACE: ${{ vars.PRIMARY_WORKSPACE }}
+          ENABLE_DB_RESET: ${{ vars.ENABLE_DB_RESET }}
+          AWS_ENABLE_XRAY: ${{ vars.AWS_ENABLE_XRAY || vars.ENABLE_XRAY || 'false' }}
+          SLACK_CLIENT_ID: ${{ vars.SLACK_CLIENT_ID }}
+          SLACK_CLIENT_SECRET: ${{ secrets.SLACK_CLIENT_SECRET }}
+          SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
+        run: bash infra/aws/scripts/ci_sam_deploy_with_fallback.sh
+
+      - name: Run migrations and warm up Lambda
         run: |
-          TOKEN_KEY_OVERRIDE="${{ secrets.TOKEN_ENCRYPTION_KEY_OVERRIDE }}"
-          OVERRIDE_PARAM=""
-          if [ -n "$TOKEN_KEY_OVERRIDE" ]; then
-            OVERRIDE_PARAM=" TokenEncryptionKeyOverride=$TOKEN_KEY_OVERRIDE"
-            echo "Using TOKEN_ENCRYPTION_KEY_OVERRIDE for disaster-recovery deploy."
-          fi
-          sam deploy \
-            -t .aws-sam/build/template.yaml \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
-            --stack-name ${{ vars.AWS_STACK_NAME }} \
-            --s3-bucket ${{ vars.AWS_S3_BUCKET }} \
-            --capabilities CAPABILITY_IAM \
-            --region ${{ vars.AWS_REGION }} \
-            --no-disable-rollback \
-            --force-upload \
-            --parameter-overrides \
-              "Stage=${{ vars.STAGE_NAME }} \
-               DatabaseEngine=${{ vars.DATABASE_ENGINE || 'mysql' }} \
-               ExistingDatabaseHost=${{ vars.EXISTING_DATABASE_HOST }} \
-               ExistingDatabaseAdminUser=${{ vars.EXISTING_DATABASE_ADMIN_USER }} \
-               ExistingDatabaseAdminPassword=${{ secrets.EXISTING_DATABASE_ADMIN_PASSWORD }} \
-               ExistingDatabaseNetworkMode=${{ vars.EXISTING_DATABASE_NETWORK_MODE || 'public' }} \
-               ExistingDatabaseSubnetIdsCsv=${{ vars.EXISTING_DATABASE_SUBNET_IDS_CSV }} \
-               ExistingDatabaseLambdaSecurityGroupId=${{ vars.EXISTING_DATABASE_LAMBDA_SECURITY_GROUP_ID }} \
-               DatabaseSchema=${{ vars.DATABASE_SCHEMA }} \
-               LogLevel=${{ vars.LOG_LEVEL || 'INFO' }} \
-               RequireAdmin=${{ vars.REQUIRE_ADMIN || 'true' }} \
-               SoftDeleteRetentionDays=${{ vars.SOFT_DELETE_RETENTION_DAYS || '30' }} \
-               SyncbotFederationEnabled=${{ vars.SYNCBOT_FEDERATION_ENABLED || 'false' }} \
-               SyncbotInstanceId=${{ vars.SYNCBOT_INSTANCE_ID }} \
-               SyncbotPublicUrl=${{ vars.SYNCBOT_PUBLIC_URL }} \
-               PrimaryWorkspace=${{ vars.PRIMARY_WORKSPACE }} \
-               EnableDbReset=${{ vars.ENABLE_DB_RESET }} \
-               SlackClientID=${{ vars.SLACK_CLIENT_ID }} \
-               SlackClientSecret=${{ secrets.SLACK_CLIENT_SECRET }} \
-               SlackSigningSecret=${{ secrets.SLACK_SIGNING_SECRET }} \
-               $OVERRIDE_PARAM"
+          FUNCTION_ARN=$(aws cloudformation describe-stacks \
+            --stack-name ${{ vars.AWS_STACK_NAME || 'syncbot-test' }} \
+            --query "Stacks[0].Outputs[?OutputKey=='SyncBotFunctionArn'].OutputValue" \
+            --output text)
+          bash infra/aws/scripts/invoke_lambda_migrate.sh "$FUNCTION_ARN"
+
+      - name: Post-deploy summary
+        run: |
+          STACK=${{ vars.AWS_STACK_NAME || 'syncbot-test' }}
+          API_URL=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='SyncBotApiUrl'].OutputValue" --output text)
+          INSTALL_URL=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='SyncBotInstallUrl'].OutputValue" --output text)
+          OAUTH_URL="${API_URL%/slack/events}/slack/oauth_redirect"
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## SyncBot Deploy (test)
+          - **Stack**: $STACK
+          - **API URL**: $API_URL
+          - **Install URL**: $INSTALL_URL
+          - **OAuth Redirect URL**: $OAUTH_URL
+          EOF
 
   sam-deploy-prod:
-    if: github.ref == 'refs/heads/prod'
+    if: (github.ref == 'refs/heads/prod') || (github.event.inputs.environment == 'prod')
     runs-on: ubuntu-latest
     environment: prod
     needs: sam-build
     steps:
+      - uses: actions/checkout@v6
+
       - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
@@ -132,49 +162,67 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: build-artifact
-          path: './.aws-sam/build'
+          path: '.'
 
       - uses: aws-actions/setup-sam@v2
         with:
           use-installer: true
+          version: "1.165.0"
+
+      - name: Ensure bootstrap stack
+        env:
+          AWS_BOOTSTRAP_STACK_NAME: ${{ vars.AWS_BOOTSTRAP_STACK_NAME || vars.BOOTSTRAP_STACK_NAME || 'syncbot-bootstrap' }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: bash infra/aws/scripts/ensure_bootstrap.sh
 
       - name: Deploy to prod
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET }}
+          AWS_STACK_NAME: ${{ vars.AWS_STACK_NAME || 'syncbot-prod' }}
+          AWS_BOOTSTRAP_STACK_NAME: ${{ vars.AWS_BOOTSTRAP_STACK_NAME || vars.BOOTSTRAP_STACK_NAME || 'syncbot-bootstrap' }}
+          STAGE_NAME: prod
+          DATABASE_BACKEND: ${{ vars.DATABASE_BACKEND }}
+          AWS_DATABASE_MODE: ${{ vars.AWS_DATABASE_MODE }}
+          ENABLE_KEEP_WARM: ${{ vars.ENABLE_KEEP_WARM || 'true' }}
+          DATABASE_ENGINE: ${{ vars.DATABASE_ENGINE }}
+          DATA_ENCRYPTION_KEY: ${{ secrets.DATA_ENCRYPTION_KEY }}
+          DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+          DATABASE_USER: ${{ vars.DATABASE_USER }}
+          DATABASE_HOST: ${{ vars.DATABASE_HOST }}
+          DATABASE_PORT: ${{ vars.DATABASE_PORT }}
+          DATABASE_SCHEMA: ${{ vars.DATABASE_SCHEMA }}
+          DATABASE_TLS_ENABLED: ${{ vars.DATABASE_TLS_ENABLED }}
+          DATABASE_SSL_CA_PATH: ${{ vars.DATABASE_SSL_CA_PATH }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+          PRIMARY_WORKSPACE: ${{ vars.PRIMARY_WORKSPACE }}
+          ENABLE_DB_RESET: ${{ vars.ENABLE_DB_RESET }}
+          AWS_ENABLE_XRAY: ${{ vars.AWS_ENABLE_XRAY || vars.ENABLE_XRAY || 'false' }}
+          SLACK_CLIENT_ID: ${{ vars.SLACK_CLIENT_ID }}
+          SLACK_CLIENT_SECRET: ${{ secrets.SLACK_CLIENT_SECRET }}
+          SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
+        run: bash infra/aws/scripts/ci_sam_deploy_with_fallback.sh
+
+      - name: Run migrations and warm up Lambda
         run: |
-          TOKEN_KEY_OVERRIDE="${{ secrets.TOKEN_ENCRYPTION_KEY_OVERRIDE }}"
-          OVERRIDE_PARAM=""
-          if [ -n "$TOKEN_KEY_OVERRIDE" ]; then
-            OVERRIDE_PARAM=" TokenEncryptionKeyOverride=$TOKEN_KEY_OVERRIDE"
-            echo "Using TOKEN_ENCRYPTION_KEY_OVERRIDE for disaster-recovery deploy."
-          fi
-          sam deploy \
-            -t .aws-sam/build/template.yaml \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
-            --stack-name ${{ vars.AWS_STACK_NAME }} \
-            --s3-bucket ${{ vars.AWS_S3_BUCKET }} \
-            --capabilities CAPABILITY_IAM \
-            --region ${{ vars.AWS_REGION }} \
-            --no-disable-rollback \
-            --force-upload \
-            --parameter-overrides \
-              "Stage=${{ vars.STAGE_NAME }} \
-               DatabaseEngine=${{ vars.DATABASE_ENGINE || 'mysql' }} \
-               ExistingDatabaseHost=${{ vars.EXISTING_DATABASE_HOST }} \
-               ExistingDatabaseAdminUser=${{ vars.EXISTING_DATABASE_ADMIN_USER }} \
-               ExistingDatabaseAdminPassword=${{ secrets.EXISTING_DATABASE_ADMIN_PASSWORD }} \
-               ExistingDatabaseNetworkMode=${{ vars.EXISTING_DATABASE_NETWORK_MODE || 'public' }} \
-               ExistingDatabaseSubnetIdsCsv=${{ vars.EXISTING_DATABASE_SUBNET_IDS_CSV }} \
-               ExistingDatabaseLambdaSecurityGroupId=${{ vars.EXISTING_DATABASE_LAMBDA_SECURITY_GROUP_ID }} \
-               DatabaseSchema=${{ vars.DATABASE_SCHEMA }} \
-               LogLevel=${{ vars.LOG_LEVEL || 'INFO' }} \
-               RequireAdmin=${{ vars.REQUIRE_ADMIN || 'true' }} \
-               SoftDeleteRetentionDays=${{ vars.SOFT_DELETE_RETENTION_DAYS || '30' }} \
-               SyncbotFederationEnabled=${{ vars.SYNCBOT_FEDERATION_ENABLED || 'false' }} \
-               SyncbotInstanceId=${{ vars.SYNCBOT_INSTANCE_ID }} \
-               SyncbotPublicUrl=${{ vars.SYNCBOT_PUBLIC_URL }} \
-               PrimaryWorkspace=${{ vars.PRIMARY_WORKSPACE }} \
-               EnableDbReset=${{ vars.ENABLE_DB_RESET }} \
-               SlackClientID=${{ vars.SLACK_CLIENT_ID }} \
-               SlackClientSecret=${{ secrets.SLACK_CLIENT_SECRET }} \
-               SlackSigningSecret=${{ secrets.SLACK_SIGNING_SECRET }} \
-               $OVERRIDE_PARAM"
+          FUNCTION_ARN=$(aws cloudformation describe-stacks \
+            --stack-name ${{ vars.AWS_STACK_NAME || 'syncbot-prod' }} \
+            --query "Stacks[0].Outputs[?OutputKey=='SyncBotFunctionArn'].OutputValue" \
+            --output text)
+          bash infra/aws/scripts/invoke_lambda_migrate.sh "$FUNCTION_ARN"
+
+      - name: Post-deploy summary
+        run: |
+          STACK=${{ vars.AWS_STACK_NAME || 'syncbot-prod' }}
+          API_URL=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='SyncBotApiUrl'].OutputValue" --output text)
+          INSTALL_URL=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='SyncBotInstallUrl'].OutputValue" --output text)
+          OAUTH_URL="${API_URL%/slack/events}/slack/oauth_redirect"
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## SyncBot Deploy (prod)
+          - **Stack**: $STACK
+          - **API URL**: $API_URL
+          - **Install URL**: $INSTALL_URL
+          - **OAuth Redirect URL**: $OAUTH_URL
+          EOF

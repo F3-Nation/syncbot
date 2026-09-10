@@ -3,51 +3,18 @@
 Defines reusable form templates that are deep-copied and customised at
 runtime before being sent to Slack:
 
-* :data:`NEW_SYNC_FORM` — Modal for creating a new sync group (channel picker).
-* :data:`JOIN_SYNC_FORM` — Modal for joining an existing sync group
-  (sync selector + channel selector).
 * :data:`ENTER_GROUP_CODE_FORM` — Modal for entering a group invite code.
-* :data:`PUBLISH_CHANNEL_FORM` — Modal for publishing a channel.
-* :data:`SUBSCRIBE_CHANNEL_FORM` — Modal for subscribing to a channel.
+* :data:`CREATE_SYNC_FORM` — Channel picker template for Create Sync.
+* :data:`JOIN_SYNC_FORM` — Channel picker template for Join Sync.
+
+Any form containing a :class:`~slack.orm.ConversationsSelectElement` defaults to
+public channels only. Because these are module-level constants, the
+``allow_private_channels`` policy cannot be baked in here without going stale, so
+callers must apply it to their deep copy via
+:meth:`~slack.orm.BlockView.set_conversations_include_private`.
 """
 
 from slack import actions, orm
-
-NEW_SYNC_FORM = orm.BlockView(
-    blocks=[
-        orm.InputBlock(
-            label="Channel to Sync",
-            action=actions.CONFIG_NEW_SYNC_CHANNEL_SELECT,
-            element=orm.ConversationsSelectElement(placeholder="Select a Channel"),
-            optional=False,
-        ),
-        orm.ContextBlock(
-            element=orm.ContextElement(
-                initial_value="Select the Channel you want to sync. The Sync will be named after the Channel. "
-                "If a Sync has already been set up in another Workspace, use 'Join existing Sync' instead.",
-            ),
-        ),
-    ]
-)
-
-JOIN_SYNC_FORM = orm.BlockView(
-    blocks=[
-        orm.InputBlock(
-            label="Sync Select",
-            action=actions.CONFIG_JOIN_SYNC_SELECT,
-            element=orm.StaticSelectElement(placeholder="Select a Sync to join"),
-            optional=False,
-        ),
-        orm.InputBlock(
-            label="Sync Channel Select",
-            action=actions.CONFIG_JOIN_SYNC_CHANNEL_SELECT,
-            element=orm.ConversationsSelectElement(placeholder="Select a Channel to use for this Sync"),
-            optional=False,
-            dispatch_action=True,
-        ),
-    ]
-)
-
 
 ENTER_GROUP_CODE_FORM = orm.BlockView(
     blocks=[
@@ -66,34 +33,34 @@ ENTER_GROUP_CODE_FORM = orm.BlockView(
 )
 
 
-PUBLISH_CHANNEL_FORM = orm.BlockView(
+CREATE_SYNC_FORM = orm.BlockView(
     blocks=[
         orm.InputBlock(
-            label="Channel to Publish",
-            action=actions.CONFIG_PUBLISH_CHANNEL_SELECT,
-            element=orm.ConversationsSelectElement(placeholder="Select a Channel to publish"),
+            label="Channel",
+            action=actions.CONFIG_CREATE_SYNC_SELECT,
+            element=orm.ConversationsSelectElement(placeholder="Search for a Channel"),
             optional=False,
         ),
         orm.ContextBlock(
             element=orm.ContextElement(
-                initial_value="Select a Channel from your Workspace to make available for Syncing.",
+                initial_value="Select a Channel from your Workspace to create a Sync.",
             ),
         ),
     ]
 )
 
 
-SUBSCRIBE_CHANNEL_FORM = orm.BlockView(
+JOIN_SYNC_FORM = orm.BlockView(
     blocks=[
         orm.InputBlock(
-            label="Channel for Sync",
-            action=actions.CONFIG_SUBSCRIBE_CHANNEL_SELECT,
-            element=orm.ConversationsSelectElement(placeholder="Select a Channel to sync into"),
+            label="Channel",
+            action=actions.CONFIG_JOIN_SYNC_SELECT,
+            element=orm.ConversationsSelectElement(placeholder="Search for a Channel"),
             optional=False,
         ),
         orm.ContextBlock(
             element=orm.ContextElement(
-                initial_value="Select a Channel in your Workspace to receive messages from the published Channel.",
+                initial_value="Select a Channel in your Workspace to join this Sync.",
             ),
         ),
     ]

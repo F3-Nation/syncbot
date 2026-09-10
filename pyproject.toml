@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "syncbot"
-version = "1.0.1"
+version = "1.6.0"
 description = "Sync chat threads between Slack Workspaces."
 authors = ["Evan Petzoldt <evan.petzoldt@protonmail.com>", "Klint Van Tassel <developer@sprocktech.com>"]
 readme = "README.md"
@@ -16,7 +16,7 @@ slack-bolt = "^1.27.0"
 sqlalchemy = "^2.0"
 pymysql = "^1.1.2"
 psycopg2-binary = "^2.9"
-cryptography = "^46.0.0"
+cryptography = "^50.0.0"
 requests = "^2.32.0"
 
 
@@ -26,7 +26,7 @@ pytest = "^9.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "infra/aws/tests", "infra/gcp/tests"]
-pythonpath = ["syncbot", "infra/aws/db_setup"]
+pythonpath = ["syncbot", "infra/aws/lambda"]
 
 [tool.ruff]
 target-version = "py312"
@@ -64,3 +64,37 @@ indent-style = "space"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:tool.poetry.version"]
+commit_message = "chore(release): {version} [skip ci]"
+tag_format = "{version}"
+major_on_zero = false
+build_command = ""
+
+[tool.semantic_release.branches.main]
+match = "main"
+prerelease = false
+
+[tool.semantic_release.changelog]
+mode = "update"
+insertion_flag = "<!-- version list -->"
+template_dir = ".github/semantic-release/templates"
+exclude_commit_patterns = [
+    "^chore",
+    "^ci(?:\\(|:)",
+    "^docs(?:\\(|:)",
+    "^test(?:\\(|:)",
+    "^style(?:\\(|:)",
+    "^build(?:\\(|:)",
+    "^refactor(?:\\(|:)",
+    "^Merge ",
+]
+
+[tool.semantic_release.changelog.default_templates]
+changelog_file = "CHANGELOG.md"
+
+[tool.semantic_release.commit_parser_options]
+allowed_tags = ["feat", "fix", "perf", "refactor", "docs", "build", "chore", "ci", "test", "style"]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf"]

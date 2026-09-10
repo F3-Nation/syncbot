@@ -11,6 +11,7 @@ from federation.core import (
     build_edit_payload,
     build_message_payload,
     build_reaction_payload,
+    federation_endpoint_url,
     federation_sign,
     federation_verify,
     generate_federation_code,
@@ -19,8 +20,9 @@ from federation.core import (
     get_or_create_instance_keypair,
     get_public_url,
     initiate_federation_connect,
+    instance_id_matches_public_key,
     parse_federation_code,
-    ping_federated_workspace,
+    public_key_fingerprint,
     push_delete,
     push_edit,
     push_message,
@@ -30,6 +32,7 @@ from federation.core import (
     validate_webhook_url,
     verify_body,
 )
+from federation.deliver import deliver_remote, federation_image_payloads
 
 __all__ = [
     "FEDERATION_USER_AGENT",
@@ -37,6 +40,9 @@ __all__ = [
     "build_edit_payload",
     "build_message_payload",
     "build_reaction_payload",
+    "deliver_remote",
+    "federation_endpoint_url",
+    "federation_image_payloads",
     "federation_sign",
     "federation_verify",
     "generate_federation_code",
@@ -45,8 +51,9 @@ __all__ = [
     "get_or_create_instance_keypair",
     "get_public_url",
     "initiate_federation_connect",
+    "instance_id_matches_public_key",
     "parse_federation_code",
-    "ping_federated_workspace",
+    "public_key_fingerprint",
     "push_delete",
     "push_edit",
     "push_message",

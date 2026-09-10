@@ -2,18 +2,18 @@
 
 ## Full-Instance Backup and Restore
 
-**`PRIMARY_WORKSPACE`** must be set to a Slack Team ID for backup/restore to be available. When set, the **Backup/Restore** button is only shown in that workspace. When unset, backup/restore is hidden everywhere.
+**`PRIMARY_WORKSPACE`** must be set to a Slack Team ID for backup and restore to show up. When it is set, the **Backup/Restore** button appears only in that workspace. When it is unset, backup and restore are hidden everywhere.
 
-Use **Backup/Restore** (Home tab, next to Refresh) to:
+Use **Backup/Restore** on the Home tab (next to Refresh) to:
 
-- **Download backup** — Generates a JSON file containing all tables (workspaces, groups, syncs, channels, post meta, user directory, user mappings, federation, instance keys). The file is sent to your DM. Backup includes an HMAC for integrity and a hash of the encryption key. **Use the same `TOKEN_ENCRYPTION_KEY` on the target instance** so restored bot tokens decrypt; otherwise workspaces must reinstall the app to re-authorize.
-- **Restore from backup** — Paste the backup JSON in the modal and submit. Restore is intended for an **empty or fresh database** (e.g. after an AWS rebuild). If the encryption key hash or HMAC does not match, you will see a warning and can still proceed (e.g. if you edited the file on purpose).
+- **Download backup** — Generates a JSON file of the durable tables (workspaces, groups, syncs, channels, post meta, user directory, user mappings, federation, instance keys). Ephemeral Slack `event_id` claims are not included. The file is sent to your DM. The backup includes an HMAC for integrity and a hash of the encryption key. **Use the same `DATA_ENCRYPTION_KEY` on the target instance** so restored bot and user tokens decrypt; otherwise workspaces must reinstall the app to re-authorize.
+- **Restore from backup** — Paste the backup JSON in the modal and submit. Restore is meant for an **empty or fresh database** (for example after an AWS rebuild). If the encryption key hash or HMAC does not match, you will see a warning and can still proceed (for example if you edited the file on purpose).
 
 After restore, Home tab caches are cleared so the next Refresh shows current data.
 
 ## Reset Database
 
-Setting **`ENABLE_DB_RESET=true`** (with **`PRIMARY_WORKSPACE`** matching the current workspace) shows a **Reset Database** button on the Home tab. This is an advanced/destructive feature -- it drops and reinitializes the entire database. The deploy scripts do not prompt for it; set it manually via your provider's env/secret configuration (e.g. AWS CloudFormation `EnableDbReset` parameter, GCP Terraform `enable_db_reset` variable, or GitHub Actions `ENABLE_DB_RESET` variable).
+Setting **`ENABLE_DB_RESET=true`** (with **`PRIMARY_WORKSPACE`** matching the current workspace) shows a **Reset Database** button on the Home tab. This is an advanced, destructive feature: it drops and reinitializes the entire database. The deploy scripts do not prompt for it. Set it in the env file (AWS `--setup-github` copies it when present) or in SAM / Terraform (`EnableDbReset` / `enable_db_reset`).
 
 ## Workspace Data Migration (Federation)
 

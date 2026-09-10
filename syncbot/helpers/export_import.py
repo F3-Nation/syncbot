@@ -9,7 +9,8 @@ import hmac
 import json
 import logging
 import os
-from datetime import datetime
+import secrets
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -17,18 +18,21 @@ from sqlalchemy import MetaData, Table, delete, select
 
 import constants
 from db import DbManager, get_engine, schemas
+from helpers.workspace import get_workspace_by_id
 
 _logger = logging.getLogger(__name__)
 
 BACKUP_VERSION = 1
 MIGRATION_VERSION = 1
 _RAW_BACKUP_TABLES = ("slack_bots", "slack_installations", "slack_oauth_states")
-_DATETIME_COLUMNS = frozenset({
-    "bot_token_expires_at",
-    "user_token_expires_at",
-    "installed_at",
-    "expire_at",
-})
+_DATETIME_COLUMNS = frozenset(
+    {
+        "bot_token_expires_at",
+        "user_token_expires_at",
+        "installed_at",
+        "expire_at",
+    }
+)
 
 
 def _dump_raw_table(table_name: str) -> list[dict]:
@@ -86,16 +90,16 @@ def canonical_json_dumps(obj: dict) -> bytes:
 
 
 def _compute_encryption_key_hash() -> str | None:
-    """SHA-256 hex of TOKEN_ENCRYPTION_KEY, or None if unset."""
-    key = os.environ.get(constants.TOKEN_ENCRYPTION_KEY, "")
+    """SHA-256 hex of DATA_ENCRYPTION_KEY, or None if unset."""
+    key = os.environ.get(constants.DATA_ENCRYPTION_KEY) or os.environ.get(constants._DATA_ENCRYPTION_KEY_LEGACY, "")
     if not key or key == "123":
         return None
     return hashlib.sha256(key.encode()).hexdigest()
 
 
 def _compute_backup_hmac(payload_without_hmac: dict) -> str:
-    """HMAC-SHA256 of canonical JSON of payload (excluding hmac field), keyed by TOKEN_ENCRYPTION_KEY."""
-    key = os.environ.get(constants.TOKEN_ENCRYPTION_KEY, "")
+    """HMAC-SHA256 of canonical JSON of payload (excluding hmac field), keyed by DATA_ENCRYPTION_KEY."""
+    key = os.environ.get(constants.DATA_ENCRYPTION_KEY) or os.environ.get(constants._DATA_ENCRYPTION_KEY_LEGACY, "")
     if not key:
         key = ""
     raw = canonical_json_dumps(payload_without_hmac)
@@ -122,13 +126,15 @@ def _records_to_list(records: list, cls: type) -> list[dict]:
 # Full-instance backup
 # ---------------------------------------------------------------------------
 
+
 def build_full_backup() -> dict:
     """Build full-instance backup payload (all tables, version, exported_at, encryption_key_hash, hmac)."""
     payload = {
         "version": BACKUP_VERSION,
-        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "exported_at": datetime.now(UTC).isoformat() + "Z",
         "encryption_key_hash": _compute_encryption_key_hash(),
     }
+    # processed_events and user_action_echoes are ephemeral — omit from backup.
     tables = [
         ("workspaces", schemas.Workspace),
         ("workspace_groups", schemas.WorkspaceGroup),
@@ -140,6 +146,7 @@ def build_full_backup() -> dict:
         ("user_mappings", schemas.UserMapping),
         ("federated_workspaces", schemas.FederatedWorkspace),
         ("instance_keys", schemas.InstanceKey),
+        ("workspace_settings", schemas.WorkspaceSetting),
     ]
     for table_name, cls in tables:
         records = DbManager.find_records(cls, [])
@@ -198,6 +205,7 @@ def restore_full_backup(
         "user_mappings",
         "federated_workspaces",
         "instance_keys",
+        "workspace_settings",
     ]
     table_to_schema = {
         "workspaces": schemas.Workspace,
@@ -210,17 +218,29 @@ def restore_full_backup(
         "user_mappings": schemas.UserMapping,
         "federated_workspaces": schemas.FederatedWorkspace,
         "instance_keys": schemas.InstanceKey,
+        "workspace_settings": schemas.WorkspaceSetting,
     }
-    datetime_keys = {"created_at", "updated_at", "deleted_at", "joined_at", "matched_at"}
+    datetime_keys = {"created_at", "updated_at", "deleted_at", "joined_at", "mapped_at", "matched_at"}
     for table_name in tables:
         rows = data.get(table_name, [])
         if table_name in _RAW_BACKUP_TABLES:
             _restore_raw_table(table_name, rows)
             continue
         cls = table_to_schema[table_name]
+        # Backups taken before a column was dropped still carry it; passing an
+        # unknown kwarg to the model would raise. Skip anything the current
+        # schema no longer has (e.g. workspace_groups.created_by_workspace_id).
+        known_columns = {col.name for col in cls.__table__.columns}
         for row in rows:
+            # Remap old backup keys before known_columns skips unknown names.
+            if table_name == "user_mappings" and "mapped_at" not in row and "matched_at" in row:
+                row = {**row, "mapped_at": row["matched_at"]}
+            if table_name == "workspace_settings" and row.get("key") == "last_auto_match":
+                row = {**row, "key": "last_auto_map"}
             kwargs = {}
             for k, v in row.items():
+                if k not in known_columns:
+                    continue
                 if v is None:
                     kwargs[k] = None
                 elif isinstance(v, str) and k in datetime_keys:
@@ -232,6 +252,10 @@ def restore_full_backup(
                     kwargs[k] = Decimal(str(v))
                 else:
                     kwargs[k] = v
+            # Legacy backups use the pre-003 role name. Without this the Home tab
+            # owner label silently disappears and the workspace loses owner rights.
+            if table_name == "workspace_group_members" and kwargs.get("role") == "creator":
+                kwargs["role"] = "owner"
             rec = cls(**kwargs)
             DbManager.merge_record(rec)
             if table_name == "workspaces" and rec.team_id:
@@ -243,9 +267,11 @@ def restore_full_backup(
 # Cache invalidation after restore/import
 # ---------------------------------------------------------------------------
 
+
 def invalidate_home_tab_caches_for_team(team_id: str) -> None:
     """Clear home_tab_hash and home_tab_blocks for a team so next Refresh does full rebuild."""
     from helpers._cache import _cache_delete_prefix
+
     _cache_delete_prefix(f"home_tab_hash:{team_id}")
     _cache_delete_prefix(f"home_tab_blocks:{team_id}")
 
@@ -256,19 +282,21 @@ def invalidate_home_tab_caches_for_all_teams(team_ids: list[str]) -> None:
         invalidate_home_tab_caches_for_team(tid)
 
 
-def invalidate_sync_list_cache_for_channel(channel_id: str) -> None:
-    """Clear get_sync_list cache for a channel."""
-    from helpers._cache import _cache_delete
-    _cache_delete(f"sync_list:{channel_id}")
+def invalidate_channel_memberships_cache(channel_id: str) -> None:
+    """Clear membership caches for a channel."""
+    from helpers.sync_participation import invalidate_channel_memberships
+
+    invalidate_channel_memberships(channel_id)
 
 
 # ---------------------------------------------------------------------------
 # Data migration export (workspace-scoped)
 # ---------------------------------------------------------------------------
 
+
 def build_migration_export(workspace_id: int, include_source_instance: bool = True) -> dict:
     """Build workspace-scoped migration JSON. Optionally sign with Ed25519 and include source_instance."""
-    workspace = DbManager.get_record(schemas.Workspace, workspace_id)
+    workspace = get_workspace_by_id(workspace_id)
     if not workspace or workspace.deleted_at:
         raise ValueError("Workspace not found")
 
@@ -288,7 +316,8 @@ def build_migration_export(workspace_id: int, include_source_instance: bool = Tr
     for membership in memberships:
         g = DbManager.get_record(schemas.WorkspaceGroup, membership.group_id)
         if g:
-            groups_data.append({"name": g.name, "role": membership.role})
+            role = "owner" if membership.role == "creator" else membership.role
+            groups_data.append({"name": g.name, "role": role})
 
     # Syncs that have at least one SyncChannel for W
     sync_channels_w = DbManager.find_records(
@@ -310,34 +339,55 @@ def build_migration_export(workspace_id: int, include_source_instance: bool = Tr
         pub_team = None
         tgt_team = None
         if sync.publisher_workspace_id:
-            publisher_ws = DbManager.get_record(schemas.Workspace, sync.publisher_workspace_id)
+            publisher_ws = get_workspace_by_id(sync.publisher_workspace_id)
             if publisher_ws:
                 pub_team = publisher_ws.team_id
         if sync.target_workspace_id:
-            tw = DbManager.get_record(schemas.Workspace, sync.target_workspace_id)
+            tw = get_workspace_by_id(sync.target_workspace_id)
             if tw:
                 tgt_team = tw.team_id
-        syncs_data.append({
-            "title": sync.title,
-            "sync_mode": sync.sync_mode or "group",
-            "publisher_team_id": pub_team,
-            "target_team_id": tgt_team,
-            "is_publisher": sync.publisher_workspace_id == workspace_id,
-        })
+        syncs_data.append(
+            {
+                "title": sync.title,
+                "sync_mode": sync.sync_mode or "group",
+                "publisher_team_id": pub_team,
+                "target_team_id": tgt_team,
+                "is_publisher": sync.publisher_workspace_id == workspace_id,
+            }
+        )
         for sync_channel in sync_channels_w:
             if sync_channel.sync_id != sync_id:
                 continue
-            sync_channels_data.append({
-                "sync_title": sync.title,
-                "channel_id": sync_channel.channel_id,
-                "status": sync_channel.status or "active",
-            })
+            sync_channels_data.append(
+                {
+                    "sync_title": sync.title,
+                    "channel_id": sync_channel.channel_id,
+                    "status": sync_channel.status or "active",
+                    "publishes": sync_channel.publishes,
+                    "subscribes": sync_channel.subscribes,
+                    "reaction_style": sync_channel.reaction_style,
+                    "reaction_direction": sync_channel.reaction_direction,
+                }
+            )
             key = f"{sync.title}:{sync_channel.channel_id}"
             post_metas = DbManager.find_records(
                 schemas.PostMeta,
                 [schemas.PostMeta.sync_channel_id == sync_channel.id],
             )
-            post_meta_by_key[key] = [{"post_id": post_meta.post_id, "ts": float(post_meta.ts)} for post_meta in post_metas]
+            post_meta_by_key[key] = [
+                {
+                    "post_id": post_meta.post_id,
+                    "ts": float(post_meta.ts),
+                    "kind": getattr(post_meta, "kind", constants.POST_META_KIND_MESSAGE)
+                    or constants.POST_META_KIND_MESSAGE,
+                    "parent_post_id": getattr(post_meta, "parent_post_id", None),
+                    "reaction": getattr(post_meta, "reaction", None),
+                    "source_user_id": getattr(post_meta, "source_user_id", None),
+                    "source_workspace_id": getattr(post_meta, "source_workspace_id", None),
+                    "posted_as_user_id": getattr(post_meta, "posted_as_user_id", None),
+                }
+                for post_meta in post_metas
+            ]
 
     # user_directory for W
     ud_records = DbManager.find_records(
@@ -349,37 +399,42 @@ def build_migration_export(workspace_id: int, include_source_instance: bool = Tr
     )
     user_directory_data = []
     for u in ud_records:
-        user_directory_data.append({
-            "slack_user_id": u.slack_user_id,
-            "email": u.email,
-            "real_name": u.real_name,
-            "display_name": u.display_name,
-            "normalized_name": u.normalized_name,
-            "updated_at": u.updated_at.isoformat() if u.updated_at else None,
-        })
+        user_directory_data.append(
+            {
+                "slack_user_id": u.slack_user_id,
+                "email": u.email,
+                "real_name": u.real_name,
+                "display_name": u.display_name,
+                "normalized_name": u.normalized_name,
+                "updated_at": u.updated_at.isoformat() if u.updated_at else None,
+            }
+        )
 
     # user_mappings involving W (export with team_id for other side)
     um_records = DbManager.find_records(
         schemas.UserMapping,
         [
-            (schemas.UserMapping.source_workspace_id == workspace_id) | (schemas.UserMapping.target_workspace_id == workspace_id),
+            (schemas.UserMapping.source_workspace_id == workspace_id)
+            | (schemas.UserMapping.target_workspace_id == workspace_id),
         ],
     )
     user_mappings_data = []
     for um in um_records:
-        src_ws = DbManager.get_record(schemas.Workspace, um.source_workspace_id) if um.source_workspace_id else None
-        tgt_ws = DbManager.get_record(schemas.Workspace, um.target_workspace_id) if um.target_workspace_id else None
-        user_mappings_data.append({
-            "source_team_id": src_ws.team_id if src_ws else None,
-            "target_team_id": tgt_ws.team_id if tgt_ws else None,
-            "source_user_id": um.source_user_id,
-            "target_user_id": um.target_user_id,
-            "match_method": um.match_method,
-        })
+        src_ws = get_workspace_by_id(um.source_workspace_id) if um.source_workspace_id else None
+        tgt_ws = get_workspace_by_id(um.target_workspace_id) if um.target_workspace_id else None
+        user_mappings_data.append(
+            {
+                "source_team_id": src_ws.team_id if src_ws else None,
+                "target_team_id": tgt_ws.team_id if tgt_ws else None,
+                "source_user_id": um.source_user_id,
+                "target_user_id": um.target_user_id,
+                "map_method": um.map_method,
+            }
+        )
 
     payload = {
         "version": MIGRATION_VERSION,
-        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "exported_at": datetime.now(UTC).isoformat() + "Z",
         "workspace": {"team_id": team_id, "workspace_name": workspace_name},
         "groups": groups_data,
         "syncs": syncs_data,
@@ -391,24 +446,29 @@ def build_migration_export(workspace_id: int, include_source_instance: bool = Tr
 
     if include_source_instance:
         from federation import core as federation
+
         try:
-            url = federation.get_public_url()
+            endpoint = federation.federation_endpoint_url()
             instance_id = federation.get_instance_id()
             _, public_key_pem = federation.get_or_create_instance_keypair()
-            code = federation.generate_federation_code(webhook_url=url, instance_id=instance_id, public_key=public_key_pem)
-            payload["source_instance"] = {
-                "webhook_url": url,
-                "instance_id": instance_id,
-                "public_key": public_key_pem,
-                "connection_code": code,
-            }
+            if endpoint:
+                code = federation.encode_federation_connection_blob(
+                    endpoint, instance_id, public_key_pem, "FED-" + secrets.token_hex(4).upper()
+                )
+                payload["source_instance"] = {
+                    "webhook_url": endpoint,
+                    "instance_id": instance_id,
+                    "public_key": public_key_pem,
+                    "connection_code": code,
+                }
         except Exception as e:
             _logger.warning("build_migration_export: could not add source_instance: %s", e)
 
     # Sign with Ed25519 (exclude signature from signed bytes; include signed_at)
     try:
         from federation import core as federation
-        payload["signed_at"] = datetime.utcnow().isoformat() + "Z"
+
+        payload["signed_at"] = datetime.now(UTC).isoformat() + "Z"
         to_sign = {k: v for k, v in payload.items() if k != "signature"}
         raw = canonical_json_dumps(to_sign).decode("utf-8")
         payload["signature"] = federation.sign_body(raw)
@@ -430,6 +490,7 @@ def verify_migration_signature(data: dict) -> bool:
     to_verify = {k: v for k, v in data.items() if k != "signature"}
     raw = canonical_json_dumps(to_verify).decode("utf-8")
     from federation import core as federation
+
     return federation.verify_body(raw, sig, public_key)
 
 
@@ -445,8 +506,6 @@ def import_migration_data(
     - Replace mode: soft-delete W's SyncChannels in this group and their PostMeta, then create from export.
     - team_id_to_workspace_id: map export team_id -> B's workspace id (for publisher/target and user_mappings).
     """
-    from datetime import UTC
-
     syncs_export = data.get("syncs", [])
     sync_channels_export = data.get("sync_channels", [])
     post_meta_export = data.get("post_meta", {})
@@ -496,7 +555,11 @@ def import_migration_data(
             tgt_team = s.get("target_team_id")
             is_publisher = s.get("is_publisher")
             pub_ws_id = (workspace_id if is_publisher else team_id_to_workspace_id.get(pub_team)) if pub_team else None
-            tgt_ws_id = (workspace_id if tgt_team == export_team_id else team_id_to_workspace_id.get(tgt_team)) if tgt_team else None
+            tgt_ws_id = (
+                (workspace_id if tgt_team == export_team_id else team_id_to_workspace_id.get(tgt_team))
+                if tgt_team
+                else None
+            )
             new_sync = schemas.Sync(
                 title=title,
                 group_id=group_id,
@@ -520,16 +583,28 @@ def import_migration_data(
             workspace_id=workspace_id,
             channel_id=channel_id,
             status=status,
+            publishes=sc_entry.get("publishes", True),
+            subscribes=sc_entry.get("subscribes", True),
+            reaction_style=sc_entry.get("reaction_style"),
+            reaction_direction=sc_entry.get("reaction_direction") or constants.DEFAULT_REACTION_DIRECTION,
             created_at=datetime.now(UTC),
         )
         DbManager.create_record(new_sync_channel)
         key = f"{sync_title}:{channel_id}"
         for post_meta in post_meta_export.get(key, []):
-            DbManager.create_record(schemas.PostMeta(
-                post_id=post_meta["post_id"],
-                sync_channel_id=new_sync_channel.id,
-                ts=Decimal(str(post_meta["ts"])),
-            ))
+            DbManager.create_record(
+                schemas.PostMeta(
+                    post_id=post_meta["post_id"],
+                    sync_channel_id=new_sync_channel.id,
+                    ts=Decimal(str(post_meta["ts"])),
+                    kind=post_meta.get("kind") or constants.POST_META_KIND_MESSAGE,
+                    parent_post_id=post_meta.get("parent_post_id"),
+                    reaction=post_meta.get("reaction"),
+                    source_user_id=post_meta.get("source_user_id"),
+                    source_workspace_id=post_meta.get("source_workspace_id"),
+                    posted_as_user_id=post_meta.get("posted_as_user_id"),
+                )
+            )
 
     # user_directory for W (replace: remove existing for this workspace then insert)
     DbManager.delete_records(
@@ -537,15 +612,19 @@ def import_migration_data(
         [schemas.UserDirectory.workspace_id == workspace_id],
     )
     for u in user_directory_export:
-        DbManager.create_record(schemas.UserDirectory(
-            workspace_id=workspace_id,
-            slack_user_id=u["slack_user_id"],
-            email=u.get("email"),
-            real_name=u.get("real_name"),
-            display_name=u.get("display_name"),
-            normalized_name=u.get("normalized_name"),
-            updated_at=datetime.fromisoformat(u["updated_at"].replace("Z", "+00:00")) if u.get("updated_at") else datetime.now(UTC),
-        ))
+        DbManager.create_record(
+            schemas.UserDirectory(
+                workspace_id=workspace_id,
+                slack_user_id=u["slack_user_id"],
+                email=u.get("email"),
+                real_name=u.get("real_name"),
+                display_name=u.get("display_name"),
+                normalized_name=u.get("normalized_name"),
+                updated_at=datetime.fromisoformat(u["updated_at"].replace("Z", "+00:00"))
+                if u.get("updated_at")
+                else datetime.now(UTC),
+            )
+        )
 
     # user_mappings where both source and target workspace exist on B
     for um in user_mappings_export:
@@ -565,12 +644,14 @@ def import_migration_data(
         )
         if existing:
             continue
-        DbManager.create_record(schemas.UserMapping(
-            source_workspace_id=src_ws_id,
-            source_user_id=um["source_user_id"],
-            target_workspace_id=tgt_ws_id,
-            target_user_id=um.get("target_user_id"),
-            match_method=um.get("match_method", "none"),
-            matched_at=datetime.now(UTC),
-            group_id=group_id,
-        ))
+        DbManager.create_record(
+            schemas.UserMapping(
+                source_workspace_id=src_ws_id,
+                source_user_id=um["source_user_id"],
+                target_workspace_id=tgt_ws_id,
+                target_user_id=um.get("target_user_id"),
+                map_method=um.get("map_method") or um.get("match_method", "none"),
+                mapped_at=datetime.now(UTC),
+                group_id=group_id,
+            )
+        )

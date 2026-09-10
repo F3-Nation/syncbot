@@ -7,7 +7,7 @@ from slack_sdk.web import WebClient
 import helpers
 from db import DbManager
 from db.schemas import Workspace, WorkspaceGroup, WorkspaceGroupMember
-from helpers import get_user_id_from_body, is_user_authorized, safe_get
+from helpers import get_user_id_from_body, is_workspace_manager, safe_get
 
 _logger = logging.getLogger(__name__)
 
@@ -37,7 +37,8 @@ def _deny_unauthorized(body: dict, client: WebClient, logger) -> bool:
         logger.warning("authorization_denied: could not determine user_id from request body")
         return True
 
-    if is_user_authorized(client, user_id):
+    team_id = _get_team_id(body)
+    if is_workspace_manager(client, user_id, team_id):
         return False
 
     channel_id = safe_get(body, "channel_id") or safe_get(body, "channel", "id")
@@ -51,7 +52,7 @@ def _deny_unauthorized(body: dict, client: WebClient, logger) -> bool:
             client.chat_postEphemeral(
                 channel=channel_id,
                 user=user_id,
-                text=":lock: Only workspace admins and owners can configure SyncBot.",
+                text=":lock: Only workspace managers can configure SyncBot.",
             )
         except Exception:
             _logger.debug("Could not send ephemeral denial — user may have invoked from a modal")
@@ -82,14 +83,7 @@ def _get_groups_for_workspace(workspace_id: int) -> list[tuple[WorkspaceGroup, W
 
 def _get_group_members(group_id: int) -> list[WorkspaceGroupMember]:
     """Return all active members of a group."""
-    return DbManager.find_records(
-        WorkspaceGroupMember,
-        [
-            WorkspaceGroupMember.group_id == group_id,
-            WorkspaceGroupMember.status == "active",
-            WorkspaceGroupMember.deleted_at.is_(None),
-        ],
-    )
+    return helpers.get_group_members(group_id)
 
 
 def _get_workspace_info(workspace: Workspace) -> dict:

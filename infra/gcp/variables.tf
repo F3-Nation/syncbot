@@ -1,7 +1,7 @@
 # GCP Terraform variables for SyncBot (see docs/INFRA_CONTRACT.md)
 #
-# Sections: project / region / stage → database mode → Cloud Run → keep-warm →
-# Secret Manager IDs and scope envs → optional overrides.
+# Sections: project / region / stage → database_backend → Cloud Run → keep-warm →
+# GitHub WIF → sensitive app secrets → runtime plain env.
 
 variable "project_id" {
   type        = string
@@ -11,41 +11,64 @@ variable "project_id" {
 variable "region" {
   type        = string
   default     = "us-central1"
-  description = "Primary region for Cloud Run and optional Cloud SQL"
+  description = "Primary region for Cloud Run and optional GCS Litestream replica"
 }
 
 variable "stage" {
   type        = string
   default     = "test"
-  description = "Stage name (e.g. test, prod); used for resource naming"
+  description = "Stage name (test or prod); used for resource naming"
+
+  validation {
+    condition     = contains(["test", "prod"], var.stage)
+    error_message = "stage must be test or prod."
+  }
 }
 
 # ---------------------------------------------------------------------------
-# Database: use existing or create Cloud SQL
+# Database: sqlite (default, Litestream + GCS) or mysql / postgresql
+# database_mode and existing_db_* are aliases (remove in 2.0.0).
 # ---------------------------------------------------------------------------
 
-variable "use_existing_database" {
-  type        = bool
-  default     = false
-  description = "If true, do not create Cloud SQL; app uses existing_db_host/schema/user/password"
+variable "database_mode" {
+  type        = string
+  default     = "sqlite"
+  description = "Alias for database_backend (sqlite or existing). Prefer database_backend."
+
+  validation {
+    condition     = contains(["sqlite", "existing"], var.database_mode)
+    error_message = "database_mode must be sqlite or existing."
+  }
 }
 
 variable "existing_db_host" {
   type        = string
   default     = ""
-  description = "Existing MySQL host (required when use_existing_database = true)"
+  description = "Alias for database_host."
 }
 
 variable "existing_db_schema" {
   type        = string
-  default     = "syncbot"
-  description = "Existing MySQL schema name (when use_existing_database = true)"
+  default     = ""
+  description = "Alias for database_schema. Empty defaults to syncbot_$${stage} (for example syncbot_test)."
 }
 
 variable "existing_db_user" {
   type        = string
   default     = ""
-  description = "Existing MySQL user (when use_existing_database = true)"
+  description = "Alias for database_user."
+}
+
+variable "database_host" {
+  type        = string
+  default     = ""
+  description = "DATABASE_HOST. Required when database_backend is mysql or postgresql."
+}
+
+variable "database_schema" {
+  type        = string
+  default     = ""
+  description = "DATABASE_SCHEMA. Empty uses existing_db_schema, then syncbot_$${stage}."
 }
 
 # ---------------------------------------------------------------------------
@@ -54,13 +77,8 @@ variable "existing_db_user" {
 
 variable "cloud_run_image" {
   type        = string
-  default     = ""
-  description = "Container image URL for Cloud Run (e.g. gcr.io/PROJECT/syncbot:latest). Set after first build or by CI."
-
-  validation {
-    condition     = trimspace(var.cloud_run_image) != ""
-    error_message = "cloud_run_image is required. Build/push the SyncBot image and pass -var=cloud_run_image=<image>."
-  }
+  default     = "gcr.io/cloudrun/hello"
+  description = "Container image URL. Bootstrap default is a public hello image; CI updates the live service (Terraform ignores image changes after apply)."
 }
 
 variable "cloud_run_cpu" {
@@ -78,13 +96,18 @@ variable "cloud_run_memory" {
 variable "cloud_run_min_instances" {
   type        = number
   default     = 0
-  description = "Minimum number of instances (0 allows scale-to-zero)"
+  description = "Minimum instances. 0 = free/best-effort scale-to-zero (default). 1 = paid always-on (Slack 3s guarantee)."
+
+  validation {
+    condition     = contains([0, 1], var.cloud_run_min_instances)
+    error_message = "cloud_run_min_instances must be 0 or 1."
+  }
 }
 
 variable "cloud_run_max_instances" {
   type        = number
   default     = 10
-  description = "Maximum number of Cloud Run instances"
+  description = "Maximum Cloud Run instances (sqlite always forces 1)."
 }
 
 variable "log_level" {
@@ -105,7 +128,7 @@ variable "log_level" {
 variable "enable_keep_warm" {
   type        = bool
   default     = true
-  description = "Create a Cloud Scheduler job that pings the service periodically"
+  description = "Create a Cloud Scheduler job that pings GET /health periodically (free-tier friendly)"
 }
 
 variable "keep_warm_interval_minutes" {
@@ -115,56 +138,70 @@ variable "keep_warm_interval_minutes" {
 }
 
 # ---------------------------------------------------------------------------
-# Secrets: names only; values are set outside Terraform (gcloud or console)
+# GitHub Actions OIDC (Workload Identity Federation)
 # ---------------------------------------------------------------------------
 
-variable "secret_slack_signing_secret" {
+variable "github_repo" {
   type        = string
-  default     = "syncbot-slack-signing-secret"
-  description = "Secret Manager secret ID for SLACK_SIGNING_SECRET"
+  default     = ""
+  description = "GitHub repo in owner/repo format for WIF (must be the deploying repo, e.g. your fork). Empty skips WIF."
+
+  validation {
+    condition     = var.github_repo == "" || can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", var.github_repo))
+    error_message = "github_repo must be empty or 'owner/repo'."
+  }
 }
 
-variable "secret_slack_client_id" {
+# ---------------------------------------------------------------------------
+# Sensitive app secrets (passed as Terraform variables; injected as plain env)
+# ---------------------------------------------------------------------------
+
+variable "slack_signing_secret" {
   type        = string
-  default     = "syncbot-slack-client-id"
-  description = "Secret Manager secret ID for SLACK_CLIENT_ID"
+  sensitive   = true
+  description = "SLACK_SIGNING_SECRET for request verification"
 }
 
-variable "secret_slack_client_secret" {
+variable "slack_client_id" {
   type        = string
-  default     = "syncbot-slack-client-secret"
-  description = "Secret Manager secret ID for SLACK_CLIENT_SECRET"
+  description = "SLACK_CLIENT_ID (OAuth app Client ID)"
 }
 
-variable "secret_slack_bot_scopes" {
+variable "slack_client_secret" {
   type        = string
-  default     = "syncbot-slack-scopes"
-  description = "Secret Manager secret ID whose value is comma-separated bot OAuth scopes (runtime env SLACK_BOT_SCOPES)"
+  sensitive   = true
+  description = "SLACK_CLIENT_SECRET (OAuth client secret)"
+}
+
+variable "slack_bot_scopes" {
+  type        = string
+  default     = "app_mentions:read,channels:history,channels:join,channels:read,channels:manage,chat:write,chat:write.customize,emoji:read,files:read,files:write,groups:history,groups:read,groups:write,im:write,reactions:read,reactions:write,team:read,usergroups:read,users:read,users:read.email"
+  description = "Comma-separated Slack OAuth bot scopes (SLACK_BOT_SCOPES)"
 }
 
 variable "slack_user_scopes" {
   type        = string
-  default     = "chat:write,channels:history,channels:read,files:read,files:write,groups:history,groups:read,groups:write,im:write,reactions:read,reactions:write,team:read,users:read,users:read.email"
-  description = "Comma-separated user OAuth scopes for Cloud Run (SLACK_USER_SCOPES). Must match slack-manifest.json oauth_config.scopes.user and syncbot/slack_manifest_scopes.py USER_SCOPES; default matches repo standard (same string as AWS SAM SlackOauthUserScopes Default)."
+  default     = "chat:write,channels:history,channels:read,files:read,files:write,groups:history,groups:read,groups:write,reactions:read,reactions:write,team:read,users:read,users:read.email"
+  description = "Comma-separated user OAuth scopes for Cloud Run (SLACK_USER_SCOPES). Must match slack-manifest.json oauth_config.scopes.user."
 }
 
-variable "secret_token_encryption_key" {
+variable "data_encryption_key" {
   type        = string
-  default     = "syncbot-token-encryption-key"
-  description = "Secret Manager secret ID for TOKEN_ENCRYPTION_KEY"
+  sensitive   = true
+  description = "DATA_ENCRYPTION_KEY for Fernet data-at-rest encryption. Generate with: python3 -c \"import secrets; print(secrets.token_urlsafe(36))\""
 }
 
-variable "token_encryption_key_override" {
+variable "database_password" {
+  type        = string
+  sensitive   = true
+  default     = ""
+  description = "DATABASE_PASSWORD for the app DB user. Required when database_backend is mysql or postgresql; unused for sqlite."
+}
+
+variable "database_user" {
   type        = string
   default     = ""
-  sensitive   = true
-  description = "Optional disaster-recovery override for TOKEN_ENCRYPTION_KEY. Leave empty for normal deploys."
-}
-
-variable "secret_db_password" {
-  type        = string
-  default     = "syncbot-db-password"
-  description = "Secret Manager secret ID for DATABASE_PASSWORD (used when use_existing_database = true or with Cloud SQL)"
+  description = "DATABASE_USER (full username, including any TiDB cluster prefix). Required when database_backend is mysql or postgresql if existing_db_user is empty."
 }
 
 # ---------------------------------------------------------------------------
@@ -173,59 +210,19 @@ variable "secret_db_password" {
 
 variable "database_backend" {
   type        = string
-  default     = "mysql"
-  description = "DATABASE_BACKEND; Cloud SQL in this stack is MySQL 8."
+  default     = ""
+  description = "DATABASE_BACKEND: mysql, postgresql, or sqlite. Empty falls through to database_mode (default sqlite)."
 
   validation {
-    condition     = contains(["mysql", "postgresql"], var.database_backend)
-    error_message = "database_backend must be mysql or postgresql."
+    condition     = contains(["", "mysql", "postgresql", "sqlite"], var.database_backend)
+    error_message = "database_backend must be empty, mysql, postgresql, or sqlite."
   }
 }
 
 variable "database_port" {
   type        = string
-  default     = "3306"
-  description = "DATABASE_PORT for MySQL (default 3306)."
-}
-
-variable "require_admin" {
-  type        = string
-  default     = "true"
-  description = "REQUIRE_ADMIN: true or false."
-
-  validation {
-    condition     = contains(["true", "false"], var.require_admin)
-    error_message = "require_admin must be true or false."
-  }
-}
-
-variable "soft_delete_retention_days" {
-  type        = number
-  default     = 30
-  description = "SOFT_DELETE_RETENTION_DAYS (minimum 1)."
-
-  validation {
-    condition     = var.soft_delete_retention_days >= 1
-    error_message = "soft_delete_retention_days must be at least 1."
-  }
-}
-
-variable "syncbot_federation_enabled" {
-  type        = bool
-  default     = false
-  description = "SYNCBOT_FEDERATION_ENABLED (maps to string true/false in env)."
-}
-
-variable "syncbot_instance_id" {
-  type        = string
   default     = ""
-  description = "SYNCBOT_INSTANCE_ID; leave empty for app auto-generation."
-}
-
-variable "syncbot_public_url_override" {
-  type        = string
-  default     = ""
-  description = "SYNCBOT_PUBLIC_URL (HTTPS base, no path). Set after first deploy if using federation; empty omits the env var."
+  description = "DATABASE_PORT. Empty uses the engine default (3306 MySQL, 5432 PostgreSQL). Set for a non-standard port (e.g. TiDB Cloud 4000). Unused for sqlite."
 }
 
 variable "primary_workspace" {

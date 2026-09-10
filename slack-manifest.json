@@ -32,6 +32,7 @@
         "channels:manage",
         "chat:write",
         "chat:write.customize",
+        "emoji:read",
         "files:read",
         "files:write",
         "groups:history",
@@ -41,6 +42,7 @@
         "reactions:read",
         "reactions:write",
         "team:read",
+        "usergroups:read",
         "users:read",
         "users:read.email"
       ],
@@ -53,7 +55,6 @@
         "groups:history",
         "groups:read",
         "groups:write",
-        "im:write",
         "reactions:read",
         "reactions:write",
         "team:read",
@@ -67,6 +68,7 @@
       "request_url": "https://your-random-tunnel-name.trycloudflare.com/slack/events",
       "bot_events": [
         "app_home_opened",
+        "app_uninstalled",
         "member_joined_channel",
         "message.channels",
         "message.groups",

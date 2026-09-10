@@ -1,0 +1,21 @@
+{# GitHub Release body. release.yml prefers the CHANGELOG section; keep this in sync. #}
+{% from "_keep_a_changelog.j2" import kac_heading, kac_bullet %}
+{% set commit_objects = release["elements"] | dictsort %}
+{% for type_, commits in commit_objects if type_ != "unknown" %}
+{% set heading = kac_heading(type_) | trim %}
+{% set ns = namespace(lines=[]) %}
+{% for commit in commits %}
+{% if commit.descriptions %}
+{% set line = kac_bullet(commit.descriptions[0]) | trim %}
+{% if line %}
+{% set ns.lines = ns.lines + [line] %}
+{% endif %}
+{% endif %}
+{% endfor %}
+{% if heading and ns.lines %}
+### {{ heading }}
+
+{{ ns.lines | unique | join("\n") }}
+
+{% endif %}
+{% endfor %}

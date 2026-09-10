@@ -13,7 +13,7 @@ Usage::
         header("SyncBot Configuration"),
         actions(button(":arrows_counterclockwise: Refresh", action=CONFIG_REFRESH_HOME)),
         divider(),
-        context("Only workspace admins can configure SyncBot."),
+        context(":lock: This area of SyncBot is limited to Workspace Admins."),
     ]
 """
 

@@ -1,8 +1,9 @@
-"""Bot-token encryption / decryption using Fernet (AES-128-CBC + HMAC-SHA256).
+"""Data-at-rest encryption / decryption using Fernet (AES-128-CBC + HMAC-SHA256).
 
-The TOKEN_ENCRYPTION_KEY env var is stretched to a 32-byte key using
-PBKDF2-HMAC-SHA256 with 600,000 iterations.  The derived Fernet instance
-is cached so the expensive KDF runs at most once per key per process.
+The DATA_ENCRYPTION_KEY env var (legacy: TOKEN_ENCRYPTION_KEY) is stretched
+to a 32-byte key using PBKDF2-HMAC-SHA256 with 600,000 iterations.  The
+derived Fernet instance is cached so the expensive KDF runs at most once
+per key per process.
 """
 
 import base64
@@ -18,6 +19,7 @@ _logger = logging.getLogger(__name__)
 
 _PBKDF2_ITERATIONS = 600_000
 _PBKDF2_SALT_PREFIX = b"syncbot-fernet-v1"
+_SLACK_TOKEN_PREFIXES = ("xoxb-", "xoxp-", "xoxe-", "xoxa-")
 
 
 @functools.lru_cache(maxsize=2)
@@ -37,36 +39,62 @@ def _get_fernet(key: str) -> Fernet:
     return Fernet(base64.urlsafe_b64encode(derived))
 
 
+def _resolve_encryption_key() -> str:
+    """Return the encryption key from DATA_ENCRYPTION_KEY or legacy TOKEN_ENCRYPTION_KEY."""
+    return os.environ.get(constants.DATA_ENCRYPTION_KEY) or os.environ.get(constants._DATA_ENCRYPTION_KEY_LEGACY, "")
+
+
 def _encryption_enabled() -> bool:
-    """Return *True* if bot-token encryption is active."""
-    key = os.environ.get(constants.TOKEN_ENCRYPTION_KEY, "")
-    return bool(key) and key != "123"
+    """Return *True* if data-at-rest encryption is active."""
+    return constants._encryption_active()
 
 
-def encrypt_bot_token(token: str) -> str:
-    """Encrypt a bot token before storing it in the database."""
+def encryption_active_for_migration() -> bool:
+    """Whether Alembic should encrypt existing plaintext Slack tokens."""
+    return _encryption_enabled()
+
+
+def _looks_like_slack_token(value: str) -> bool:
+    return any(value.startswith(prefix) for prefix in _SLACK_TOKEN_PREFIXES)
+
+
+def _looks_like_fernet(value: str) -> bool:
+    return value.startswith("gAAAAA")
+
+
+def encrypt_bot_token(token: str | None) -> str | None:
+    """Encrypt a token before storing it in the database."""
+    if not token:
+        return token
     if not _encryption_enabled():
         return token
-    key = os.environ[constants.TOKEN_ENCRYPTION_KEY]
+    if _looks_like_fernet(token):
+        key = _resolve_encryption_key()
+        try:
+            _get_fernet(key).decrypt(token.encode())
+            return token
+        except InvalidToken:
+            pass
+    key = _resolve_encryption_key()
     return _get_fernet(key).encrypt(token.encode()).decode()
 
 
-def decrypt_bot_token(encrypted: str) -> str:
-    """Decrypt a bot token read from the database.
+def decrypt_bot_token(encrypted: str | None) -> str | None:
+    """Decrypt a token read from the database.
 
-    Raises on failure when encryption is enabled.
+    Raises on failure when encryption is enabled and the value is not plaintext Slack.
     """
+    if not encrypted:
+        return encrypted
     if not _encryption_enabled():
         return encrypted
-    key = os.environ[constants.TOKEN_ENCRYPTION_KEY]
+    if _looks_like_slack_token(encrypted):
+        return encrypted
+    key = _resolve_encryption_key()
     try:
         return _get_fernet(key).decrypt(encrypted.encode()).decode()
     except InvalidToken:
-        _logger.error(
-            "Bot token decryption failed — refusing to use the token. "
-            "If you recently enabled encryption, run "
-            "db/migrate_002_encrypt_tokens.py to encrypt existing tokens."
-        )
+        _logger.error("Token decryption failed — refusing to use the token.")
         raise ValueError(
-            "Bot token decryption failed. The token may be plaintext (not yet migrated) or tampered with."
+            "Token decryption failed. The token may be plaintext (not yet migrated) or tampered with."
         ) from None

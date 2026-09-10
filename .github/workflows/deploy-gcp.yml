@@ -1,11 +1,18 @@
-# Deploy SyncBot to GCP (Cloud Run). See docs/DEPLOYMENT.md and docs/INFRA_CONTRACT.md.
-# To use AWS instead, disable this workflow and use deploy-aws.yml.
+# Deploy SyncBot to GCP (Cloud Run). See docs/DEPLOY.md and docs/INFRA_CONTRACT.md.
 #
-# Setup:
-# 1. Run infra/gcp Terraform and configure Workload Identity Federation for GitHub.
-# 2. Set GitHub vars: GCP_PROJECT_ID, GCP_REGION, GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT.
-# 3. Set GitHub secrets for Slack/DB/encryption as needed for your CI (or use Secret Manager only).
-# 4. This workflow intentionally fails until real build/deploy steps are configured.
+# Image-only updates: Slack secrets and DATA_ENCRYPTION_KEY stay on the Cloud Run
+# service from the last terraform apply. This workflow builds infra/gcp/Dockerfile,
+# pushes to Artifact Registry, and runs `gcloud run services update --image`.
+#
+# Required GitHub variables (repository or environment):
+#   GITHUB_DEPLOY_TARGET=gcp
+#   GCP_PROJECT_ID
+#   GCP_REGION
+#   GCP_WORKLOAD_IDENTITY_PROVIDER
+#   GCP_SERVICE_ACCOUNT
+#
+# github_repo in Terraform must equal owner/repo of THIS repository (the one
+# with test/prod), not F3Nation-Community/slack-syncbot if you deploy from a fork.
 
 name: Deploy (GCP)
 
@@ -14,63 +21,107 @@ on:
     branches:
       - test
       - prod
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - test
+          - prod
+
+concurrency:
+  group: deploy-gcp-${{ github.event.inputs.environment || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   id-token: write
   contents: read
 
-# Run only when DEPLOY_TARGET is set to 'gcp' (disable deploy-aws.yml if using GCP only)
 jobs:
-  build-and-push:
-    if: vars.DEPLOY_TARGET == 'gcp'
+  deploy:
+    if: (vars.GITHUB_DEPLOY_TARGET || vars.DEPLOY_TARGET) == 'gcp' && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/prod')
     runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || github.ref_name }}
     steps:
       - uses: actions/checkout@v6
 
-      # Workload Identity Federation: authenticate without a key file
-      # - uses: google-github-actions/auth@v2
-      #   with:
-      #     workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-      #     service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
-
-      # - uses: google-github-actions/setup-gcloud@v2
-
-      # Build and push container image to Artifact Registry
-      # - run: |
-      #     gcloud builds submit --tag "${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/syncbot-TEST-images/syncbot:${{ github.sha }}" .
-
-      - name: Fail until GCP CI is configured
+      - name: Resolve stage
+        id: stage
         run: |
-          echo "GCP CI deploy is not configured in this repository."
-          echo "Implement WIF auth, image build/push, and deploy steps in deploy-gcp.yml before enabling DEPLOY_TARGET=gcp."
-          exit 1
+          STAGE="${{ github.event.inputs.environment || github.ref_name }}"
+          if [[ "$STAGE" != "test" && "$STAGE" != "prod" ]]; then
+            echo "::error::Stage must be test or prod (got '$STAGE')."
+            exit 1
+          fi
+          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
 
-  deploy-test:
-    if: github.ref == 'refs/heads/test'
-    runs-on: ubuntu-latest
-    needs: build-and-push
-    # environment: test
-    steps:
-      # - uses: google-github-actions/auth@v2
-      #   with:
-      #     workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-      #     service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
-      # - run: gcloud run deploy syncbot-test --image=... --region=...
-      - run: |
-          echo "deploy-test is blocked because GCP CI deploy is not configured."
-          exit 1
+      - name: Preflight GitHub vars
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+        run: |
+          missing=0
+          for v in GCP_PROJECT_ID GCP_REGION GCP_WORKLOAD_IDENTITY_PROVIDER GCP_SERVICE_ACCOUNT; do
+            if [[ -z "${!v}" ]]; then
+              echo "::error::$v is empty."
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "::error::Copy values from infra/gcp/scripts/print-bootstrap-outputs.sh after terraform apply (set github_repo to this owner/repo). See docs/DEPLOY.md."
+            exit 1
+          fi
 
-  deploy-prod:
-    if: github.ref == 'refs/heads/prod'
-    runs-on: ubuntu-latest
-    needs: build-and-push
-    # environment: prod
-    steps:
-      # - uses: google-github-actions/auth@v2
-      #   with:
-      #     workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-      #     service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
-      # - run: gcloud run deploy syncbot-prod --image=... --region=...
-      - run: |
-          echo "deploy-prod is blocked because GCP CI deploy is not configured."
-          exit 1
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${{ vars.GCP_REGION }}-docker.pkg.dev" --quiet
+
+      - name: Build, push, and update Cloud Run
+        env:
+          STAGE: ${{ steps.stage.outputs.stage }}
+        run: |
+          set -euo pipefail
+          IMAGE="${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/syncbot-${STAGE}-images/syncbot:${{ github.sha }}"
+          docker build -f infra/gcp/Dockerfile --platform linux/amd64 -t "$IMAGE" .
+          docker push "$IMAGE"
+          if ! gcloud run services update "syncbot-${STAGE}" \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --image "$IMAGE"; then
+            echo "::error::gcloud run services update failed."
+            echo "::error::If the service is missing, run terraform apply first: ./deploy.sh --env ${STAGE}"
+            echo "::error::If this is a WIF 403, github_repo must equal owner/repo of THIS GitHub repository (the one with test/prod), not F3Nation-Community/slack-syncbot when deploying from a fork."
+            exit 1
+          fi
+
+      - name: Post-deploy summary
+        env:
+          STAGE: ${{ steps.stage.outputs.stage }}
+        run: |
+          set -euo pipefail
+          SERVICE="syncbot-${STAGE}"
+          BASE_URL=$(gcloud run services describe "$SERVICE" \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --format 'value(status.url)')
+          INSTALL_URL="${BASE_URL}/slack/install"
+          OAUTH_URL="${BASE_URL}/slack/oauth_redirect"
+          EVENTS_URL="${BASE_URL}/slack/events"
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## SyncBot Deploy ($STAGE)
+          - **Service**: $SERVICE
+          - **Base URL**: $BASE_URL
+          - **Install URL**: $INSTALL_URL
+          - **OAuth Redirect URL**: $OAUTH_URL
+          - **Event / Request URL**: $EVENTS_URL
+          EOF

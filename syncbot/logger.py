@@ -130,10 +130,10 @@ class DevFormatter(logging.Formatter):
     _RESERVED = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__.keys())
 
     _COLORS = {
-        "DEBUG": "\033[90m",       # grey
-        "INFO": "\033[32m",        # green
-        "WARNING": "\033[33m",     # yellow
-        "ERROR": "\033[31m",       # red
+        "DEBUG": "\033[90m",  # grey
+        "INFO": "\033[32m",  # green
+        "WARNING": "\033[33m",  # yellow
+        "ERROR": "\033[31m",  # red
         "CRITICAL": "\033[1;31m",  # bold red
     }
     _RESET = "\033[0m"

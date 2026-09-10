@@ -16,8 +16,7 @@ _REFRESH_COOLDOWN_SECONDS = getattr(constants, "REFRESH_COOLDOWN_SECONDS", 60)
 def cooldown_message_block(remaining_seconds: int) -> dict:
     """Return a Block Kit context block dict for the refresh cooldown message."""
     text = (
-        f"No new data. Wait {remaining_seconds} second{'s' if remaining_seconds != 1 else ''} "
-        "before refreshing again."
+        f"No new data. Wait {remaining_seconds} second{'s' if remaining_seconds != 1 else ''} before refreshing again."
     )
     return {
         "type": "context",

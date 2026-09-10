@@ -14,6 +14,7 @@ Federation API endpoints (``/api/federation/*``) handle cross-instance
 communication and are dispatched separately from Slack events.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -38,25 +39,22 @@ from slack_bolt.request import BoltRequest
 from slack_bolt.response import BoltResponse
 from slack_bolt.util.utils import get_boot_message
 
-# SlackRequestHandler requires boto3, which is pre-installed on AWS Lambda but
-# not in generic containers (e.g. Cloud Run).  Defer the import so non-Lambda
-# deployments don't crash at startup.
+# Optional: Cloud Run / local images built from requirements.txt do not include boto3.
 try:
     from slack_bolt.adapter.aws_lambda import SlackRequestHandler
-
-    _HAS_LAMBDA_ADAPTER = True
-except ImportError:
-    _HAS_LAMBDA_ADAPTER = False
+except ImportError:  # pragma: no cover - exercised in tests via subprocess
+    SlackRequestHandler = None
 
 from constants import (
-    FEDERATION_ENABLED,
+    FEDERATION_API_BASE_PATH,
     HAS_REAL_BOT_TOKEN,
     LOCAL_DEVELOPMENT,
     validate_config,
 )
 from db import initialize_database
 from federation.api import dispatch_federation_request
-from helpers import get_oauth_flow, get_request_type, safe_get
+from helpers import capture_public_base, federation_enabled, get_oauth_flow, get_request_type, safe_get
+from helpers.oauth import capture_public_base_from_lambda_event
 from logger import (
     configure_logging,
     emit_metric,
@@ -69,7 +67,11 @@ _SENSITIVE_KEYS = frozenset(
     {
         "token",
         "bot_token",
+        "user_token",
         "access_token",
+        "bot_refresh_token",
+        "user_refresh_token",
+        "refresh_token",
         "shared_secret",
         "public_key",
         "private_key",
@@ -84,17 +86,21 @@ def _redact_sensitive(obj, _depth=0):
         return obj
     if isinstance(obj, dict):
         return {k: "[REDACTED]" if k in _SENSITIVE_KEYS else _redact_sensitive(v, _depth + 1) for k, v in obj.items()}
+        return {k: "[REDACTED]" if k in _SENSITIVE_KEYS else _redact_sensitive(v, _depth + 1) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_redact_sensitive(v, _depth + 1) for v in obj]
     return obj
 
 
-if _HAS_LAMBDA_ADAPTER:
+if SlackRequestHandler is not None:
     SlackRequestHandler.clear_all_log_handlers()
 configure_logging()
 
 validate_config()
-initialize_database()
+# On Lambda, defer Alembic to a post-deploy invoke (see handler migrate branch) so cold
+# starts stay under Slack's 3s ack budget. Cloud Run / local still run migrations here.
+if not os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+    initialize_database()
 
 app = App(
     process_before_response=not LOCAL_DEVELOPMENT,
@@ -105,40 +111,136 @@ app = App(
 
 @app.middleware
 def _capture_slack_retry_num(req, resp, next):
-    """Expose ``X-Slack-Retry-Num`` on context so message handlers can drop retries."""
+    """Expose ``X-Slack-Retry-Num`` on context (handlers dedup by ``event_id``, not retry num)."""
     headers = getattr(req, "headers", None) or {}
     vals = headers.get("x-slack-retry-num")
     if vals:
         try:
-            v = vals[0] if isinstance(vals, (list, tuple)) else vals
+            v = vals[0] if isinstance(vals, list | tuple) else vals
             req.context["slack_retry_num"] = int(v)
         except (ValueError, TypeError, IndexError):
             pass
     return next()
 
 
+@app.middleware
+def _capture_public_base_url(req, resp, next):
+    """Remember this request's public origin for /slack/install and federation."""
+    capture_public_base(getattr(req, "headers", None), req.context)
+    return next()
+
+
 def handler(event: dict, context: dict) -> dict:
     """AWS Lambda entry point.
 
-    Receives an API Gateway proxy event.  Federation API paths
+    Receives a Lambda Function URL event.  Federation API paths
     (``/api/federation/*``) are handled directly; everything else
     is delegated to the Slack Bolt request handler.
+
+    Also handles post-deploy ``{"action": "migrate"}`` (Alembic) and EventBridge
+    keep-warm invokes before Slack routing.
     """
+    if event.get("action") == "migrate":
+        initialize_database()
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"status": "ok", "action": "migrate"}),
+        }
+
+    if event.get("source") in ("aws.scheduler", "aws.events"):
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"status": "ok", "action": "warmup"}),
+        }
+
     path = event.get("path", "") or event.get("rawPath", "")
-    if path.startswith("/api/federation"):
+    capture_public_base_from_lambda_event(event)
+    if path.startswith(FEDERATION_API_BASE_PATH):
+        if not federation_enabled():
+            return {
+                "statusCode": 404,
+                "headers": {"Content-Type": "text/plain;charset=utf-8"},
+                "body": "Not Found",
+            }
         return _lambda_federation_handler(event)
 
-    if not _HAS_LAMBDA_ADAPTER:
-        raise RuntimeError("Lambda handler called but boto3/slack_bolt Lambda adapter not installed")
+    if _lambda_http_method(event) == "GET" and path not in ("/slack/install", "/slack/oauth_redirect"):
+        # Bolt's Lambda adapter treats every GET as OAuth install. A browser
+        # favicon hit after /slack/install would issue a new state cookie and
+        # the real callback would fail with invalid_browser.
+        return {
+            "statusCode": 404,
+            "headers": {"Content-Type": "text/plain;charset=utf-8"},
+            "body": "Not Found",
+        }
+
+    capture_public_base(event.get("headers") or {})
+
+    if SlackRequestHandler is None:
+        raise RuntimeError(
+            "AWS Lambda adapter is unavailable (boto3 / slack_bolt.adapter.aws_lambda missing). "
+            "handler() is only for Lambda; use python app.py for Cloud Run."
+        )
+
     slack_request_handler = SlackRequestHandler(app=app)
-    return slack_request_handler.handle(event, context)
+    return _as_function_url_response(slack_request_handler.handle(event, context))
+
+
+def _lambda_http_method(event: dict) -> str:
+    """HTTP method from a Function URL (payload 2.0) or API Gateway (v1) event."""
+    request_context = event.get("requestContext") or {}
+    http = request_context.get("http") or {}
+    return str(http.get("method") or event.get("httpMethod") or "").upper()
+
+
+def _as_function_url_response(resp: dict) -> dict:
+    """Move ``Set-Cookie`` into the Function URL ``cookies`` array.
+
+    Payload format 2.0 ignores ``Set-Cookie`` in ``headers``, so Bolt's OAuth
+    state cookie would never reach the browser and Allow would fail with
+    ``invalid_browser``.
+    """
+    if not isinstance(resp, dict):
+        return resp
+    headers = resp.get("headers")
+    if not headers:
+        return resp
+    cookies = list(resp.get("cookies") or [])
+    new_headers = {}
+    moved = False
+    for key, value in headers.items():
+        if str(key).lower() == "set-cookie":
+            moved = True
+            if isinstance(value, list | tuple):
+                cookies.extend(str(item) for item in value if item)
+            elif value:
+                cookies.append(str(value))
+        else:
+            new_headers[key] = value
+    if not moved:
+        return resp
+    out = {**resp, "headers": new_headers}
+    if cookies:
+        out["cookies"] = cookies
+    elif "cookies" in out:
+        out = {k: v for k, v in out.items() if k != "cookies"}
+    return out
 
 
 def _lambda_federation_handler(event: dict) -> dict:
     """Handle a federation API request inside Lambda."""
-    method = event.get("httpMethod", "GET")
-    path = event.get("path", "")
+    import base64 as _b64
+
+    method = _lambda_http_method(event) or "GET"
+    path = event.get("path", "") or event.get("rawPath", "")
     body_str = event.get("body", "") or ""
+    if event.get("isBase64Encoded") and body_str:
+        try:
+            body_str = _b64.b64decode(body_str).decode()
+        except Exception:
+            body_str = ""
     raw_headers = event.get("headers", {}) or {}
     headers = {k: v for k, v in raw_headers.items()}
 
@@ -171,15 +273,25 @@ def view_ack(body: dict, logger, client, ack, context: dict) -> None:
     )
     _logger.debug("request_body", extra={"body": json.dumps(_redact_sensitive(body))})
 
-    ack_handler = VIEW_ACK_MAPPER.get(request_id)
-    if ack_handler:
-        result = ack_handler(body, client, context)
-        if isinstance(result, dict):
-            ack(**result)
+    try:
+        ack_handler = VIEW_ACK_MAPPER.get(request_id)
+        if ack_handler:
+            result = ack_handler(body, client, context)
+            if isinstance(result, dict):
+                ack(**result)
+            else:
+                ack()
         else:
             ack()
-    else:
-        ack()
+    except Exception:
+        # Slack shows "not responding" if the ack never arrives. Schema errors
+        # (missing migration columns) used to raise here and hang the modal.
+        _logger.exception(
+            "view_ack_failed",
+            extra={"request_type": request_type, "request_id": request_id},
+        )
+        with contextlib.suppress(Exception):
+            ack()
 
 
 def main_response(body: dict, logger, client, ack, context: dict) -> None:
@@ -195,6 +307,9 @@ def main_response(body: dict, logger, client, ack, context: dict) -> None:
     attached to all log entries emitted while processing it.
     """
     set_correlation_id()
+    from helpers._cache import begin_request_scope
+
+    begin_request_scope()
     request_type, request_id = get_request_type(body)
 
     if request_type == "view_submission":
@@ -240,6 +355,7 @@ def main_response(body: dict, logger, client, ack, context: dict) -> None:
             )
             raise
     else:
+        if not (request_type == "view_submission" and request_id in VIEW_ACK_MAPPER and request_id not in VIEW_MAPPER):
         if not (request_type == "view_submission" and request_id in VIEW_ACK_MAPPER and request_id not in VIEW_MAPPER):
             _logger.error(
                 "no_handler",
@@ -287,15 +403,14 @@ def run_syncbot_http_server(
     """Start the HTTP server used by Cloud Run and ``python app.py``.
 
     Serves Slack (``bolt_path``), OAuth install/callback, ``/health``, and
-    ``/api/federation/*`` when :data:`~constants.FEDERATION_ENABLED` is true.
+    ``/api/federation/*`` when federation is enabled in Settings.
     Mirrors :class:`slack_bolt.app.app.SlackAppDevelopmentServer` routing with
-    extra paths for production parity with API Gateway + Lambda.
+    extra paths for production parity with Lambda Function URL.
     """
     listen_port = port if port is not None else _http_listen_port()
     _bolt_app = app
     _bolt_oauth_flow = app.oauth_flow
     _bolt_endpoint_path = bolt_path
-    _fed_enabled = FEDERATION_ENABLED
     _http_log = http_server_logger_enabled
     _fed_max_body = 1_048_576  # 1 MB
 
@@ -341,7 +456,7 @@ def run_syncbot_http_server(
                     json.dumps({"status": "ok"}),
                 )
                 return
-            if _fed_enabled and path.startswith("/api/federation"):
+            if federation_enabled() and path.startswith(FEDERATION_API_BASE_PATH):
                 self._handle_federation("GET")
                 return
             if _bolt_oauth_flow:
@@ -352,6 +467,7 @@ def run_syncbot_http_server(
                         query=query,
                         headers=self.headers,
                     )
+                    capture_public_base(self.headers)
                     bolt_resp = _bolt_oauth_flow.handle_installation(bolt_req)
                     self._send_bolt_response(bolt_resp)
                     return
@@ -361,6 +477,7 @@ def run_syncbot_http_server(
                         query=query,
                         headers=self.headers,
                     )
+                    capture_public_base(self.headers)
                     bolt_resp = _bolt_oauth_flow.handle_callback(bolt_req)
                     self._send_bolt_response(bolt_resp)
                     return
@@ -368,7 +485,7 @@ def run_syncbot_http_server(
 
         def do_POST(self) -> None:
             path = self._path_no_query()
-            if _fed_enabled and path.startswith("/api/federation"):
+            if federation_enabled() and path.startswith(FEDERATION_API_BASE_PATH):
                 self._handle_federation("POST")
                 return
             if path != _bolt_endpoint_path:
@@ -398,6 +515,7 @@ def run_syncbot_http_server(
                 content_len = 0
             body_str = self.rfile.read(content_len).decode() if content_len else ""
             headers = {k: v for k, v in self.headers.items()}
+            status, resp = dispatch_federation_request(method, self._path_no_query(), body_str, headers)
             status, resp = dispatch_federation_request(method, self._path_no_query(), body_str, headers)
             self._send_raw(
                 status,
