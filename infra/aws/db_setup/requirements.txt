@@ -1,4 +1,4 @@
-pymysql==1.1.2
+pymysql==1.2.0
 psycopg2-binary==2.9.11
 # Required for MySQL 8+ caching_sha2_password; pin for reproducible CI (pip-audit / sam build).
 cryptography==46.0.6
