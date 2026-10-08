@@ -25,7 +25,7 @@ jobs:
     if: vars.DEPLOY_TARGET == 'gcp'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Workload Identity Federation: authenticate without a key file
       # - uses: google-github-actions/auth@v2
