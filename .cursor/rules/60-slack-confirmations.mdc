@@ -1,0 +1,59 @@
+---
+description: Slack modal button conventions — red destructive confirmations, one button for single-purpose modals
+globs: syncbot/handlers/**,syncbot/builders/**,syncbot/slack/**
+alwaysApply: false
+---
+
+# Slack modal buttons
+
+## Destructive confirmations must have a red affirmative button
+
+Slack renders a **modal's submit button in the workspace theme colour and gives
+it no `style` field** — you cannot make it red. So a destructive confirmation
+(delete, disband, leave, stop, reset, remove, purge) must present its affirmative
+as a `danger` (red) **button inside the modal body**, run the work as a *block
+action*, and then close the modal by replacing the view.
+
+Reference implementation: the DB-reset modal (`handlers/sync.py`) and the leave/
+disband/leave-sync confirmations (`handlers/group_manage.py`, `handlers/channel_sync.py`).
+Pause Sync and Resume Sync use the same in-modal confirm pattern but are **not** red.
+
+Do:
+
+- Build the confirm modal with `submit_button_text=None` and `close_button_text="Cancel"`.
+- Put the affirmative in an `orm.ActionsBlock` with `orm.ButtonElement(..., style="danger")`.
+- Route the button's `action_id` through `ACTION_MAPPER` (block action), never `VIEW_MAPPER`.
+- After the work, call `handlers._common._close_modal_done(client, body, message)` so the
+  modal becomes a close-only "done" screen (block actions cannot close a modal themselves).
+- Keep the id in the modal's `private_metadata` (still present on modal block actions).
+
+```python
+orm.ActionsBlock(elements=[
+    orm.ButtonElement(label="Disband Group", action=actions.CONFIG_DISBAND_GROUP_CONFIRM,
+                      value=str(group_id), style="danger"),
+])
+# routing.py: ACTION_MAPPER[actions.CONFIG_DISBAND_GROUP_CONFIRM] = handlers.handle_disband_group_confirm
+```
+
+Watch the prefix matcher: `helpers.core._PREFIXED_ACTIONS` folds any `action_id`
+that starts with a trigger prefix (e.g. `leave_group`) back onto that trigger.
+A confirm action must **not** share that prefix — name it `confirm_leave_group`,
+not `leave_group_confirm`, or it will misroute to the modal-opening handler.
+Picker `action_id`s have the same rule: `join_sync` is prefixed, so the Join Sync
+channel picker is `select_join_sync`, not `join_sync_select`. `create_sync` is
+not prefixed, so `create_sync_select` is safe.
+
+Don't add a parallel leftover view-submission route alongside the block action;
+convert the existing route in place. Do not keep leftover Slack IDs after a
+rename. Refresh rebuilds Home; stale buttons may `no_handler` until then.
+
+## Single-purpose modals get exactly one button
+
+If a modal only does one thing — usually an informational or "you can't do that"
+screen whose only exit is dismissal — give it **one** button, not two that do the
+same thing. A modal with `submit_button_text="Close"` **and** `close_button_text="Cancel"`
+shows two buttons that both just dismiss.
+
+- Informational / dismiss-only modal: `submit_button_text=None`, `close_button_text="Close"`.
+- A modal is allowed two buttons only when they do **different** things, e.g. a red
+  in-modal confirm button plus `close_button_text="Cancel"`.

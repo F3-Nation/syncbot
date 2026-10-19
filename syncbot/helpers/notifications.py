@@ -1,18 +1,16 @@
 """Admin DM notifications and channel notifications."""
 
-import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from slack_sdk import WebClient
 from sqlalchemy.exc import ProgrammingError
 
-import constants
 from db import DbManager, schemas
 from helpers._cache import _cache_get, _cache_set
 from helpers.core import safe_get
-from helpers.encryption import decrypt_bot_token
-
-_logger = logging.getLogger(__name__)
+from helpers.workspace import get_bot_token
+from logger import log_debug, log_error, log_info, log_warning
 
 
 def get_admin_ids(
@@ -24,14 +22,23 @@ def get_admin_ids(
     """Return a list of admin/owner user IDs for the workspace behind *client*.
 
     If *context* and *team_id* are provided, uses request-scoped cache to avoid
-    repeated users.list for the same workspace within one request.
+    repeated users.list for the same workspace within one request. A 60s process
+    cache keyed by *team_id* covers subsequent requests on a warm container.
     """
     if context is not None and team_id:
         cache = context.setdefault("_admin_ids", {})
         if team_id in cache:
             return cache[team_id]
 
-    from helpers.user_matching import _users_list_page
+    cache_key = f"admin_ids:{team_id}" if team_id else None
+    if cache_key:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            if context is not None and team_id:
+                context.setdefault("_admin_ids", {})[team_id] = cached
+            return cached
+
+    from helpers.user_map import _users_list_page
 
     cursor = ""
     admin_ids: list[str] = []
@@ -40,7 +47,7 @@ def get_admin_ids(
         try:
             res = _users_list_page(client, cursor=cursor)
         except Exception as e:
-            _logger.warning(f"get_admin_ids: failed to list users: {e}")
+            log_warning("get_admin_ids", error=str(e))
             break
 
         members = safe_get(res, "members") or []
@@ -59,7 +66,25 @@ def get_admin_ids(
 
     if context is not None and team_id:
         context.setdefault("_admin_ids", {})[team_id] = admin_ids
+    if cache_key:
+        _cache_set(cache_key, admin_ids)
     return admin_ids
+
+
+def get_manager_ids(
+    client: WebClient,
+    *,
+    team_id: str | None = None,
+    context: dict | None = None,
+) -> list[str]:
+    """Return Slack admin/owner IDs plus extra managers for *team_id*."""
+    from helpers.workspace_settings import extra_manager_user_ids
+
+    admin_ids = get_admin_ids(client, team_id=team_id, context=context)
+    if not team_id:
+        return admin_ids
+    merged = sorted(set(admin_ids) | set(extra_manager_user_ids(team_id)))
+    return merged
 
 
 def notify_admins_dm(
@@ -67,16 +92,26 @@ def notify_admins_dm(
     message: str,
     exclude_user_ids: set[str] | None = None,
     blocks: list[dict] | None = None,
+    *,
+    include_managers: bool = True,
+    team_id: str | None = None,
+    context: dict | None = None,
 ) -> int:
-    """Send a DM to all workspace admins/owners.  Best-effort.
+    """Send a DM to workspace admins/owners and extra managers.
 
-    Returns the number of admins successfully notified.
+    Extra managers are included because these DMs are operational (sync failures,
+    group changes). Settings / Backup / Reset do not use this helper.
     """
     notified = 0
     kwargs: dict = {"text": message}
     if blocks:
         kwargs["blocks"] = blocks
-    for user_id in get_admin_ids(client):
+    user_ids = (
+        get_manager_ids(client, team_id=team_id, context=context)
+        if include_managers
+        else get_admin_ids(client, team_id=team_id, context=context)
+    )
+    for user_id in user_ids:
         if exclude_user_ids and user_id in exclude_user_ids:
             continue
         try:
@@ -86,23 +121,49 @@ def notify_admins_dm(
                 client.chat_postMessage(channel=channel_id, **kwargs)
                 notified += 1
         except Exception as e:
-            _logger.warning(f"notify_admins_dm: failed to DM user {user_id}: {e}")
+            log_warning("notify_admins_dm", user_id=user_id, error=str(e))
 
     return notified
+
+
+def notify_user_dm(client: WebClient, user_id: str | None, message: str) -> bool:
+    """Send *message* to *user_id* as a DM. Same work-phase path as handler ``_dm_user``."""
+    if not user_id or not client:
+        return False
+    try:
+        client.chat_postMessage(channel=user_id, text=message)
+        return True
+    except Exception as e:
+        log_warning("notify_user_dm_failed", user_id=user_id, error=str(e))
+        return False
+
+
+def notify_source_user_error(
+    *,
+    source_client: WebClient | None,
+    source_user_id: str | None,
+    summary: str,
+    details: dict[str, Any] | None = None,
+) -> bool:
+    """DM the source author with ``format_error_dm`` (work-phase sync failures)."""
+    from helpers.core import format_error_dm
+
+    if not source_client or not source_user_id:
+        return False
+    return notify_user_dm(source_client, source_user_id, format_error_dm(summary, details))
 
 
 def notify_admins_dm_blocks(
     client: WebClient,
     text: str,
     blocks: list[dict],
+    *,
+    team_id: str | None = None,
+    context: dict | None = None,
 ) -> list[dict]:
-    """Send a Block Kit DM to all workspace admins/owners.
-
-    Returns a list of ``{"channel": ..., "ts": ...}`` dicts for each
-    successfully sent DM (used for later message updates).
-    """
+    """Send a Block Kit DM to workspace admins/owners and extra managers."""
     sent: list[dict] = []
-    for user_id in get_admin_ids(client):
+    for user_id in get_manager_ids(client, team_id=team_id, context=context):
         try:
             dm = client.conversations_open(users=[user_id])
             channel_id = safe_get(dm, "channel", "id")
@@ -112,7 +173,7 @@ def notify_admins_dm_blocks(
                 if msg_ts:
                     sent.append({"channel": channel_id, "ts": msg_ts})
         except Exception as e:
-            _logger.warning(f"notify_admins_dm_blocks: failed to DM user {user_id}: {e}")
+            log_warning("notify_admins_dm_blocks", user_id=user_id, error=str(e))
 
     return sent
 
@@ -146,7 +207,7 @@ def notify_synced_channels(client: WebClient, channel_ids: list[str], message: s
             client.chat_postMessage(channel=channel_id, text=message)
             notified += 1
         except Exception as e:
-            _logger.warning(f"notify_synced_channels: failed to post to {channel_id}: {e}")
+            log_warning("notify_synced_channels", channel_id=channel_id, error=str(e))
     return notified
 
 
@@ -162,7 +223,9 @@ def purge_stale_soft_deletes() -> int:
         return 0
     _cache_set(cache_key, True, ttl=86400)
 
-    retention_days = constants.SOFT_DELETE_RETENTION_DAYS
+    from helpers.settings import soft_delete_retention_days
+
+    retention_days = soft_delete_retention_days()
     cutoff = datetime.now(UTC) - __import__("datetime").timedelta(days=retention_days)
 
     try:
@@ -174,7 +237,7 @@ def purge_stale_soft_deletes() -> int:
             ],
         )
     except ProgrammingError as e:
-        _logger.debug("purge_stale_soft_deletes: schema not ready (%s), skipping", e.orig if hasattr(e, "orig") else e)
+        log_debug("purge_stale_soft_deletes", value=e.orig if hasattr(e, "orig") else e)
         return 0
 
     if not stale_workspaces:
@@ -204,23 +267,34 @@ def purge_stale_soft_deletes() -> int:
                 if not member.workspace_id or member.workspace_id in notified_ws:
                     continue
                 member_ws = get_workspace_by_id(member.workspace_id)
-                if not member_ws or not member_ws.bot_token or member_ws.deleted_at is not None:
+                if not member_ws or member_ws.deleted_at is not None or not get_bot_token(member_ws):
                     continue
                 notified_ws.add(member.workspace_id)
                 try:
-                    member_client = WebClient(token=decrypt_bot_token(member_ws.bot_token))
+                    member_client = WebClient(token=get_bot_token(member_ws))
                     notify_admins_dm(
                         member_client,
-                        f":wastebasket: *{ws_name}* has been permanently removed "
+                        f":wastebasket: `{ws_name}` has been permanently removed "
                         f"after {retention_days} days of inactivity.",
+                        team_id=member_ws.team_id,
                     )
                 except Exception as e:
-                    _logger.warning(f"purge: failed to notify member {member.workspace_id}: {e}")
+                    log_warning("purge", workspace_id=member.workspace_id, error=str(e))
 
-        DbManager.delete_records(schemas.Workspace, [schemas.Workspace.id == ws.id])
+        # purge_workspace, not a bare Workspace delete: seven foreign keys across
+        # six tables still reference this row, so a parent-first delete fails on
+        # MySQL with error 1451 and the retention purge silently stops working.
+        from helpers.sync_cleanup import purge_workspace
+
+        try:
+            purge_workspace(ws.id)
+        except Exception as e:
+            log_error("purge_workspace_failed", workspace_id=ws.id, error=str(e))
+            continue
+
         purged += 1
 
     if purged:
-        _logger.info("purge_stale_soft_deletes_complete", extra={"purged": purged})
+        log_info("purge_stale_soft_deletes_complete", purged=purged)
 
     return purged

@@ -1,0 +1,9 @@
+# Litestream replica for the Cloud Run SQLite file.
+# Cloud Run must set LITESTREAM_GCS_BUCKET (sqlite mode only).
+dbs:
+  - path: /data/syncbot.db
+    replicas:
+      - type: gcs
+        bucket: ${LITESTREAM_GCS_BUCKET}
+        path: syncbot.db
+        sync-interval: 1s

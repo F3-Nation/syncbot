@@ -1,0 +1,14 @@
+---
+description: Pytest layout and expectations for SyncBot
+globs: **/*.py
+alwaysApply: false
+---
+
+# Testing
+
+- Tests live in `tests/` for application behavior and `infra/*/tests/` for infra scripts/helpers used in CI.
+- Prefer focused tests with explicit fixtures; avoid requiring real Slack credentials — mock Bolt/API boundaries where practical.
+- Platform receive caps are inputs (`FEDERATION_HTTP_MAX_MB` or a monkeypatched hop cap). Assert split/reject given a cap, and 413 retry only when the peer advertises a smaller positive cap. `0` or omitted is one part. Do not branch on `AWS_LAMBDA_FUNCTION_NAME` or `K_SERVICE`, and do not encode a provider HTTP quota as a global app default. `infra/*/tests` cover SAM/Terraform injecting the cap, not Cloud Run or Function URL body limits.
+- Use generic example names (`Workspace A`, `Workspace B`, `#general`, `#announcements`, `Ada Lovelace`, `https://peer.example`). `Partner Org` is a connection label, not a workspace name. A missing workspace name is `Workspace`. Do not copy operator screenshots or community-specific names into fixtures.
+- Match CI when relevant: `poetry run pytest -q tests/ infra/aws/tests infra/gcp/tests`. The report should have no warnings. Do not skip tests or use `filterwarnings` to hide them; fix the source (see AGENTS.md).
+- When fixing a bug, add or extend a test that would fail without the fix.

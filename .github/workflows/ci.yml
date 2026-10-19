@@ -11,54 +11,282 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      python-deps: ${{ steps.set.outputs.python-deps }}
+      sam: ${{ steps.set.outputs.sam }}
+      terraform: ${{ steps.set.outputs.terraform }}
+      gcp-docker: ${{ steps.set.outputs.gcp-docker }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
+        id: filter
+        with:
+          filters: |
+            python-deps:
+              - 'pyproject.toml'
+              - 'poetry.lock'
+              - '**/*requirements.txt'
+            sam:
+              - 'infra/aws/**'
+              - '.cfnlintrc.yaml'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/deploy-aws.yml'
+            terraform:
+              - 'infra/gcp/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/deploy-gcp.yml'
+            gcp-docker:
+              - 'infra/gcp/Dockerfile'
+              - 'infra/gcp/entrypoint.sh'
+              - 'infra/gcp/litestream.yml'
+              - 'syncbot/requirements.txt'
+      - id: set
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "python-deps=true" >> "$GITHUB_OUTPUT"
+            echo "sam=true" >> "$GITHUB_OUTPUT"
+            echo "terraform=true" >> "$GITHUB_OUTPUT"
+            echo "gcp-docker=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "python-deps=${{ steps.filter.outputs.python-deps }}" >> "$GITHUB_OUTPUT"
+            echo "sam=${{ steps.filter.outputs.sam }}" >> "$GITHUB_OUTPUT"
+            echo "terraform=${{ steps.filter.outputs.terraform }}" >> "$GITHUB_OUTPUT"
+            echo "gcp-docker=${{ steps.filter.outputs.gcp-docker }}" >> "$GITHUB_OUTPUT"
+          fi
+
   requirements-sync:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      # App token only on F3Nation-Community/slack-syncbot same-repo (not fork PRs).
+      # github.repository is the base repo on pull_request, so also require
+      # head.repo == this repository.
+      - name: Mint GitHub App token
+        if: >-
+          github.repository == 'F3Nation-Community/slack-syncbot' &&
+          (github.event_name != 'pull_request' ||
+           github.event.pull_request.head.repo.full_name == github.repository)
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+          owner: F3Nation-Community
+          repositories: slack-syncbot
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.head_ref || github.ref_name }}
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
+          persist-credentials: ${{ steps.app-token.outcome == 'success' }}
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install Poetry and export plugin
         run: |
           python -m pip install --upgrade pip
-          pip install poetry
-          poetry self add poetry-plugin-export
+          # Retry the install: when a transitive dependency of Poetry (e.g.
+          # rapidfuzz) publishes a new release, its version metadata can appear on
+          # PyPI seconds before every wheel finishes propagating to the CDN, so a
+          # fresh resolve briefly fails with "Unable to find installation
+          # candidates". Riding out that short window keeps CI green without pinning
+          # Poetry's own dependency tree.
+          for attempt in 1 2 3 4 5; do
+            if pip install poetry && poetry self add poetry-plugin-export; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "::error::Poetry/export-plugin install failed after 5 attempts."
+              exit 1
+            fi
+            echo "::warning::Poetry/export-plugin install failed (attempt ${attempt}/5); retrying in $((attempt * 15))s."
+            sleep "$((attempt * 15))"
+          done
       - name: Sync requirements.txt with poetry.lock
+        id: sync
         env:
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           poetry export -f requirements.txt --without-hashes -o syncbot/requirements.txt
           if git diff --quiet syncbot/requirements.txt; then
-            echo "requirements.txt is already in sync."
-          elif [[ -n "${PR_HEAD_REPO}" && "${PR_HEAD_REPO}" != "${GITHUB_REPOSITORY}" ]]; then
-            echo "::error::syncbot/requirements.txt is out of sync with poetry.lock. From the repo root run: poetry export -f requirements.txt --without-hashes -o syncbot/requirements.txt"
-            exit 1
+            echo "needs_commit=false" >> "$GITHUB_OUTPUT"
+            echo "requirements.txt files are already in sync."
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add syncbot/requirements.txt
-            git commit -m "chore: sync requirements.txt with poetry.lock"
-            git push
-            echo "::notice::requirements.txt was out of sync and has been auto-fixed."
+            fork_pr=false
+            if [[ -n "${PR_HEAD_REPO}" && "${PR_HEAD_REPO}" != "${GITHUB_REPOSITORY}" ]]; then
+              fork_pr=true
+            fi
+            if [[ "${GITHUB_REPOSITORY}" != "F3Nation-Community/slack-syncbot" || "${fork_pr}" == "true" ]]; then
+              echo "::error::Requirements files are out of sync with poetry.lock. Commit with pre-commit installed (sync-requirements hook) or follow docs/DEVELOPMENT.md."
+              exit 1
+            fi
+            echo "needs_commit=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Commit and push requirements sync
+        if: steps.sync.outputs.needs_commit == 'true'
+        env:
+          APP_ID: ${{ secrets.AUTOMATION_APP_ID }}
+          # [skip ci] only on push to protected deploy branches. On PRs it strands
+          # required checks (ci-gate / conventional) on HEAD and blocks auto-merge.
+          SKIP_CI: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/prod') }}
+        run: |
+          set -euo pipefail
+          git config user.name "f3n-community-automation[bot]"
+          git config user.email "${APP_ID}+f3n-community-automation[bot]@users.noreply.github.com"
+          git add syncbot/requirements.txt
+          subject="chore: sync requirements.txt files with poetry.lock"
+          if [ "${SKIP_CI}" = "true" ]; then
+            subject="${subject} [skip ci]"
+          fi
+          git commit -m "$(cat <<EOF
+          ${subject}
+
+          Automated export from poetry.lock.
+          EOF
+          )"
+          git push
+          echo "::notice::requirements.txt files were out of sync and have been auto-fixed."
+
+  forbidden-edits:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Fail if forbidden files were edited
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch origin "${BASE_REF}"
+          CHANGED="$(git diff --name-only "origin/${BASE_REF}"...HEAD)"
+          echo "Changed files vs origin/${BASE_REF}:"
+          echo "${CHANGED}"
+
+          if echo "${CHANGED}" | grep -qx 'CHANGELOG.md'; then
+            if ! grep -q '<!-- version list -->' CHANGELOG.md; then
+              echo "::error::CHANGELOG.md must keep the <!-- version list --> insertion marker; python-semantic-release inserts new versions there."
+              exit 1
+            fi
+          fi
+
+          if echo "${CHANGED}" | grep -E '(^|/)requirements\.txt$' | grep -q .; then
+            if ! echo "${CHANGED}" | grep -Eq '^(poetry\.lock|pyproject\.toml)$'; then
+              echo "::error::Do not edit requirements.txt without changing poetry.lock or pyproject.toml; export from the lockfile (pre-commit or poetry export)."
+              exit 1
+            fi
+          fi
+
+          if echo "${CHANGED}" | grep -qx 'pyproject.toml'; then
+            if git diff "origin/${BASE_REF}"...HEAD -- pyproject.toml | grep -E '^[+-][[:space:]]*version[[:space:]]*=' | grep -q .; then
+              echo "::error::Do not bump version in pyproject.toml in PRs; releases bump it via python-semantic-release."
+              exit 1
+            fi
+          fi
+
+  forbidden-imports:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Block cloud SDK imports in application package
+        run: |
+          set -euo pipefail
+          if grep -R -n -E '^import boto3|^from boto3|^import google\.cloud|^from google\.cloud' --include='*.py' syncbot/ 2>/dev/null | grep -q .; then
+            grep -R -n -E '^import boto3|^from boto3|^import google\.cloud|^from google\.cloud' --include='*.py' syncbot/ || true
+            echo "::error::Cloud SDK imports are not allowed under syncbot/ (keep provider code in infra/)."
+            exit 1
+          fi
+
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: python -m pip install --upgrade pip 'ruff==0.8.6'
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format
+        run: ruff format --check .
+
   sam-lint:
+    needs: changes
+    if: needs.changes.outputs.sam == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: aws-actions/setup-sam@v2
         with:
           use-installer: true
+          version: "1.165.0"
       - name: sam validate --lint
         run: |
           sam validate -t infra/aws/template.yaml --lint
           sam validate -t infra/aws/template.bootstrap.yaml --lint
+
+  terraform-validate:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+      - name: Terraform init / validate / fmt
+        working-directory: infra/gcp
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+          terraform fmt -check
+
+  docker-build-gcp:
+    needs: changes
+    if: needs.changes.outputs.gcp-docker == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Docker build Cloud Run image (no push)
+        run: docker build -f infra/gcp/Dockerfile --platform linux/amd64 .
+
+  pip-audit:
+    needs: changes
+    if: needs.changes.outputs.python-deps == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install Poetry, export plugin, and pip-audit
+        run: |
+          # See requirements-sync for why this install is retried (transient PyPI
+          # wheel-propagation races on freshly published Poetry dependencies).
+          for attempt in 1 2 3 4 5; do
+            if python -m pip install --upgrade pip poetry pip-audit && poetry self add poetry-plugin-export; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "::error::Poetry/export-plugin install failed after 5 attempts."
+              exit 1
+            fi
+            echo "::warning::Poetry/export-plugin install failed (attempt ${attempt}/5); retrying in $((attempt * 15))s."
+            sleep "$((attempt * 15))"
+          done
+      - name: Audit dependencies from poetry.lock (export in-job)
+        run: |
+          poetry export -f requirements.txt --without-hashes -o /tmp/syncbot-requirements.txt
+          pip-audit -r /tmp/syncbot-requirements.txt
 
   test:
     runs-on: ubuntu-latest
@@ -72,6 +300,35 @@ jobs:
           python -m pip install --upgrade pip
           pip install poetry
           poetry install --with dev
-      # Infra + deploy-script smoke tests (fast). Use `poetry run pytest` locally for the full suite.
-      - name: pytest (infra & deploy scripts)
-        run: poetry run pytest -q tests/test_deploy_script_syntax.py infra/aws/tests infra/gcp/tests
+      - name: pytest (full suite)
+        run: poetry run pytest -q tests/ infra/aws/tests infra/gcp/tests
+
+  ci-gate:
+    name: ci-gate
+    if: always()
+    needs:
+      - changes
+      - requirements-sync
+      - forbidden-edits
+      - forbidden-imports
+      - ruff
+      - sam-lint
+      - terraform-validate
+      - docker-build-gcp
+      - pip-audit
+      - test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require non-failed jobs (skipped is OK)
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["RESULTS"])
+          failed = [name for name, data in needs.items() if data.get("result") in ("failure", "cancelled")]
+          if failed:
+              print("Failed jobs:", ", ".join(failed))
+              sys.exit(1)
+          print("ci-gate: all jobs succeeded or skipped")
+          PY

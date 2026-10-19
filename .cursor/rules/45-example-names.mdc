@@ -1,0 +1,17 @@
+---
+description: Generic example names in tests, docs, and UI placeholders
+alwaysApply: true
+---
+
+# Example names
+
+Use generic fixtures. Do not copy names from operator screenshots or from any one community.
+
+- Workspaces: `Workspace A`, `Workspace B`
+- Channels: `#general`, `#announcements`
+- People: `Ada Lovelace`
+- Connection labels: `Partner Org` (not a workspace name)
+- Missing workspace name: `Workspace`
+- URLs: `https://ws-a.example`, `https://peer.example`, `https://workspace-a.slack.com`
+
+Do not use screenshot or community-specific names. GitHub org `F3Nation-Community` and deploy history stay as they are.

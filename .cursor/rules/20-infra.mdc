@@ -1,0 +1,13 @@
+---
+description: AWS SAM / GCP Terraform conventions for SyncBot
+globs: infra/**/*
+alwaysApply: false
+---
+
+# Infra conventions
+
+- Keep AWS-specific resources and IAM under `infra/aws/`; GCP under `infra/gcp/`.
+- SAM templates should validate (`sam validate --lint`) before merging infra changes that touch `infra/aws/template*.yaml`.
+- Prefer parameterized scripts (`infra/*/scripts`, `deploy.sh`) over duplicating secrets or URLs in docs — docs should link to env contract (`docs/INFRA_CONTRACT.md`). `SyncbotPublicUrl` / `syncbot_public_url_override` are leftover and unused by the app. `GET /health` and `GET /ready` are long-running only (Cloud Run / local). Lambda Function URL GETs 404; AWS keep-warm is EventBridge invoke, and deploy is `{"action":"migrate"}` then `{"action":"ready"}`.
+- Do not import application handlers from `infra/` Lambdas except via documented boundaries (the sqlite Litestream wrapper may call `initialize_database` / `app.handler`).
+- Cloud Run HTTP/1 inbound requests are 32 MiB (platform quota). Terraform injects `FEDERATION_HTTP_MAX_MB=30`. Function URL inbound is about 6 MB; SAM injects `FEDERATION_HTTP_MAX_MB=4`. Both leave 2 MiB under the platform request cap. Those numbers stay in infra, not in `syncbot/`. Do not add pytest that calls Cloud Run or Lambda to prove those quotas.
