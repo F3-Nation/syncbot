@@ -1,0 +1,54 @@
+{# Keep a Changelog insert. Update mode only; preserves history below the insertion flag. #}
+{%- from "_keep_a_changelog.j2" import kac_heading, kac_bullet -%}
+{%- set insertion_flag = ctx.changelog_insertion_flag -%}
+{%- set releases = ctx.history.released.values() | list -%}
+{%- if ctx.changelog_mode == "update" -%}
+{%- set prev_changelog_contents = ctx.prev_changelog_file | read_file | safe -%}
+{%- set changelog_parts = prev_changelog_contents.split(insertion_flag, maxsplit=1) -%}
+{%- if changelog_parts | length < 2 -%}
+{{ prev_changelog_contents }}
+{%- else -%}
+{%- set prev_changelog_top = changelog_parts[0] | trim -%}
+{%- if prev_changelog_top | length > 0 -%}
+{{ "%s\n\n%s\n" | format(prev_changelog_top, insertion_flag | trim) }}
+{%- else -%}
+{{ "%s\n" | format(insertion_flag | trim) }}
+{%- endif -%}
+{%- set previous_changelog_bottom = changelog_parts[1] | trim -%}
+{%- if releases | length > 0 -%}
+{%- set release = releases[0] -%}
+{%- set ver = release.version.as_tag() -%}
+{%- set has_version = "[" ~ ver ~ "]" in changelog_parts[1] -%}
+{%- set has_unreleased = "## [Unreleased]" in changelog_parts[1] -%}
+{%- if not has_version and has_unreleased -%}
+{%- set previous_changelog_bottom = previous_changelog_bottom | replace("## [Unreleased]", "## [" ~ ver ~ "] - " ~ release.tagged_date.strftime("%Y-%m-%d"), 1) -%}
+{%- elif not has_version %}
+
+## [{{ ver }}] - {{ release.tagged_date.strftime("%Y-%m-%d") }}
+
+{%- set commit_objects = release["elements"] | dictsort %}
+{% for type_, commits in commit_objects if type_ != "unknown" %}
+{%- set heading = kac_heading(type_) | trim -%}
+{%- set ns = namespace(lines=[]) -%}
+{%- for commit in commits -%}
+{%- if commit.descriptions -%}
+{%- set line = kac_bullet(commit.descriptions[0]) | trim -%}
+{%- if line -%}
+{%- set ns.lines = ns.lines + [line] -%}
+{%- endif -%}
+{%- endif -%}
+{%- endfor -%}
+{%- if heading and ns.lines %}
+### {{ heading }}
+
+{{ ns.lines | unique | join("\n") }}
+
+{% endif -%}
+{% endfor -%}
+{%- endif -%}
+{%- endif -%}
+{%- if previous_changelog_bottom | length > 0 %}
+{{ "\n%s\n" | format(previous_changelog_bottom) }}
+{%- endif -%}
+{%- endif -%}
+{%- endif -%}

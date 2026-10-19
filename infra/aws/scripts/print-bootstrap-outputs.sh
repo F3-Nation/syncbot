@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # Print SyncBot AWS bootstrap stack outputs for GitHub variables or local config.
 # Run from repo root:  infra/aws/scripts/print-bootstrap-outputs.sh
-# Optional env: BOOTSTRAP_STACK_NAME (default syncbot-bootstrap), AWS_REGION (default us-east-2).
+# Optional env: AWS_BOOTSTRAP_STACK_NAME (default syncbot-bootstrap), AWS_REGION (default us-east-1).
 #
 # Flow: describe-stack (key/value) -> raw lines -> suggested GitHub variable names.
 
 set -euo pipefail
 
-STACK_NAME="${BOOTSTRAP_STACK_NAME:-syncbot-bootstrap}"
-REGION="${AWS_REGION:-us-east-2}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/resolve_database_backend.sh"
+apply_aws_provider_env_aliases
+
+STACK_NAME="${AWS_BOOTSTRAP_STACK_NAME:-syncbot-bootstrap}"
+REGION="${AWS_REGION:-us-east-1}"
 
 echo "=== Bootstrap Stack Outputs ==="
 echo "Bootstrap stack: $STACK_NAME (region: $REGION)"
@@ -34,4 +39,4 @@ echo "AWS_S3_BUCKET       = $(echo "$outputs" | awk -F'\t' '$1=="DeploymentBucke
 echo "AWS_REGION          = $(echo "$outputs" | awk -F'\t' '$1=="BootstrapRegion"{print $2}')"
 echo ""
 echo "Next: deploy the app stack (sam deploy) and set the remaining GitHub vars/secrets."
-echo "TOKEN_ENCRYPTION_KEY is created by the app stack on first deploy — back it up then (see docs/DEPLOYMENT.md)."
+echo "DATA_ENCRYPTION_KEY is created by the deploy script on first deploy — back it up then (see docs/DEPLOY.md)."

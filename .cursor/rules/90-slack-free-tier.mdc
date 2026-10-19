@@ -1,0 +1,19 @@
+---
+description: Slack API research is Free-tier only
+alwaysApply: true
+---
+
+# Slack Free
+
+Target audience is Slack **Free** workspaces.
+
+When reading Slack API or help docs, keep only facts that apply to Free or to every plan. Discard Slack Connect, Enterprise Grid, org-wide installs, paid retention, Audit Logs, Discovery, SCIM, Workflows, canvases, lists, user groups, remote-files, and `check_file_info`.
+
+Free facts that matter for sync:
+
+- 90-day message/file visibility; data older than one year may be deleted
+- 5 GB file storage: `hidden_by_limit`, `storage_limit_reached`
+- Events API `message` + file objects; upload v2 (`files.getUploadURLExternal` then `files.completeUploadExternal`)
+- `upload` means share-at-upload-time vs later, not new vs parent copy
+
+Do not add code paths, scopes, or tests for discarded products. Prefer live Events API payloads over `conversations.history` / `conversations.replies` for sync (history may be hidden).

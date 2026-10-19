@@ -1,0 +1,15 @@
+---
+description: SyncBot architecture and provider-neutrality
+alwaysApply: true
+---
+
+# Architecture
+
+- **App** lives in `syncbot/` (Slack Bolt, SQLAlchemy, business logic). It must not import cloud SDKs (`boto3`, `google.cloud`, etc.).
+- **Infra** lives in `infra/aws/` (SAM, Lambda) and `infra/gcp/` (Terraform, Cloud Run) plus `.github/workflows/deploy-*.yml`.
+- **Migrations** are under `syncbot/db/alembic/`; apply patterns must respect Lambda vs long-running runtimes (see `docs/ARCHITECTURE.md` and deploy docs).
+- **Configuration contract** is documented in `docs/INFRA_CONTRACT.md` — prefer env vars and shared names over fork-specific hacks in application code. Leftover names listed there (for example `SYNCBOT_PUBLIC_URL`, `SYNCBOT_INSTANCE_ID`, `SYNCBOT_FEDERATION_ENABLED`, `REQUIRE_ADMIN`, `FILE_CHUNK_MB`) are ignored; do not revive them. Federation hop HTTP size is `FEDERATION_HTTP_MAX_MB` from infra, not an app-wide Slack file limit and not a Lambda or Cloud Run constant in `syncbot/`. App limits are documented Slack facts (1 GB file, Web API rate tiers) or a cap infra injects. Do not invent a wait deadline or copy a platform timeout into `syncbot/`. The platform request timeout is what stops work still in progress.
+
+When adding a feature, place code in the layer that can know about Slack/DB, not about a specific cloud API, unless the file is under `infra/`.
+
+The **Message Sync Flow** walkthrough in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is a code map (`#L` links plus a same-instance / cross-instance mermaid). The mermaid is Slack → SyncBot → Slack (no Lambda, Function URL, or Cloud Run). Keep those links on the current functions when the pipeline moves.

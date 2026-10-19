@@ -1,0 +1,11 @@
+# Review hints for GitHub UI. Do not enable "Require review from Code Owners"
+# on F3Nation-Community/slack-syncbot — that would block Dependabot auto-merge. Do not add
+# Dependabot to the ruleset bypass list (that would allow pushing to main without a PR).
+# Forks: replace @sprocktech-dev with your maintainers before turning Code Owners on.
+# See docs/INFRA_CONTRACT.md (Fork Compatibility Policy) and docs/AI_AGENTS.md.
+
+/infra/ @sprocktech-dev
+/.github/workflows/ @sprocktech-dev
+/pyproject.toml @sprocktech-dev
+/AGENTS.md @sprocktech-dev
+/docs/ @sprocktech-dev

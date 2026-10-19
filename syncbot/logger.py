@@ -15,26 +15,106 @@ Provides:
 
 Usage::
 
-    from logger import configure_logging, set_correlation_id, emit_metric
+    from logger import configure_logging, set_correlation_id, emit_metric, log_debug, log_info
 
     configure_logging()          # call once at module level
     set_correlation_id()         # call at the start of each request
     emit_metric("messages_synced", 3, sync_id="abc")
+    log_debug("message_skip", reason="file_echo", channel="C123")
+    log_info("heal_stub", result="converted", team_id="T1")
+    # or log("heal_stub", "INFO", result="converted", team_id="T1")
 """
 
 import json
 import logging
+import re
 import time as _time
 import uuid
 from datetime import UTC
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# Correlation-ID storage (thread-local not needed — Lambda is single-thread)
+# Correlation-ID storage (thread-local not needed — one Slack request at a time)
 # ---------------------------------------------------------------------------
 
 _correlation_id: str | None = None
 _request_start: float | None = None
+
+_REDACTED = "[REDACTED]"
+_SENSITIVE_KEYS = frozenset(
+    {
+        "token",
+        "bot_token",
+        "user_token",
+        "access_token",
+        "bot_refresh_token",
+        "user_refresh_token",
+        "refresh_token",
+        "shared_secret",
+        "public_key",
+        "private_key",
+        "private_key_encrypted",
+        "connection_code",
+        "pairing_code",
+        "raw_code",
+        "signature",
+        "sig",
+        "authorization",
+        "cookie",
+        "password",
+        "client_secret",
+        "signing_secret",
+        "slack_signing_secret",
+        "database_password",
+        "url_private",
+        "url_private_download",
+    }
+)
+_SENSITIVE_KEY_SUFFIXES = ("_token", "_secret", "_password")
+_SLACK_TOKEN_RE = re.compile(r"xox[a-z](?:\.[a-z]+)?-[\w-]+", re.IGNORECASE)
+_PAIRING_CODE_RE = re.compile(r"^FED-[0-9A-Fa-f]{8}$")
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    if lowered in _SENSITIVE_KEYS:
+        return True
+    return any(lowered.endswith(suffix) for suffix in _SENSITIVE_KEY_SUFFIXES)
+
+
+def _looks_like_secret(value: str) -> bool:
+    if _SLACK_TOKEN_RE.search(value):
+        return True
+    if "BEGIN" in value and "PRIVATE KEY" in value:
+        return True
+    if value.startswith("gAAAAA") and len(value) > 40:
+        return True
+    return bool(_PAIRING_CODE_RE.match(value.strip()))
+
+
+def _redact_value(key: str, value: Any, *, depth: int = 0) -> Any:
+    if depth > 10:
+        return value
+    if _is_sensitive_key(key):
+        return _REDACTED
+    if isinstance(value, dict):
+        return {k: _redact_value(k, v, depth=depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(key, item, depth=depth + 1) for item in value]
+    if isinstance(value, str) and _looks_like_secret(value):
+        return _REDACTED
+    return value
+
+
+def redact_sensitive(obj: Any, _depth: int = 0) -> Any:
+    """Return a copy of *obj* with tokens, keys, and pairing codes redacted."""
+    if isinstance(obj, dict):
+        return {k: _redact_value(k, v, depth=_depth) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [redact_sensitive(item, _depth + 1) for item in obj]
+    if isinstance(obj, str) and _looks_like_secret(obj):
+        return _REDACTED
+    return obj
 
 
 def set_correlation_id(value: str | None = None) -> str:
@@ -101,7 +181,7 @@ class StructuredFormatter(logging.Formatter):
         # Merge any extra fields the caller passed.
         for key, val in record.__dict__.items():
             if key not in self._RESERVED and key not in entry:
-                entry[key] = val
+                entry[key] = _redact_value(key, val)
 
         return json.dumps(entry, default=str)
 
@@ -130,10 +210,10 @@ class DevFormatter(logging.Formatter):
     _RESERVED = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__.keys())
 
     _COLORS = {
-        "DEBUG": "\033[90m",       # grey
-        "INFO": "\033[32m",        # green
-        "WARNING": "\033[33m",     # yellow
-        "ERROR": "\033[31m",       # red
+        "DEBUG": "\033[90m",  # grey
+        "INFO": "\033[32m",  # green
+        "WARNING": "\033[33m",  # yellow
+        "ERROR": "\033[31m",  # red
         "CRITICAL": "\033[1;31m",  # bold red
     }
     _RESET = "\033[0m"
@@ -159,7 +239,7 @@ class DevFormatter(logging.Formatter):
         extras = {}
         for key, val in record.__dict__.items():
             if key not in self._RESERVED and key not in ("message", "correlation_id"):
-                extras[key] = val
+                extras[key] = _redact_value(key, val)
 
         if extras:
             pairs = "  ".join(f"{k}={v}" for k, v in extras.items())
@@ -224,6 +304,68 @@ def configure_logging(level: int = logging.INFO) -> None:
 # ---------------------------------------------------------------------------
 
 _metrics_logger = logging.getLogger("syncbot.metrics")
+_event_logger = logging.getLogger("syncbot")
+
+_LEVEL_NAMES = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+def _coerce_level(level: str | int) -> int:
+    if isinstance(level, int):
+        return level
+    if isinstance(level, str):
+        try:
+            return _LEVEL_NAMES[level.strip().upper()]
+        except KeyError:
+            raise ValueError(f"unknown log level: {level!r}") from None
+    raise TypeError(f"level must be str or int, not {type(level).__name__}")
+
+
+def log(event: str, level: str | int, *, _stacklevel: int = 2, exc_info: bool = False, **fields: Any) -> None:
+    """Structured event. *event* is the stable CloudWatch ``message``.
+
+    *level* is required (``"DEBUG"`` / ``"INFO"`` / ``"WARNING"`` / ``"ERROR"``
+    / ``"CRITICAL"``, or the ``logging`` int). Prefer ``log_debug`` /
+    ``log_info`` / ``log_warning`` / ``log_error`` / ``log_critical``.
+    Never pass tokens. Decision points only, not per-loop chatter.
+    """
+    _event_logger.log(
+        _coerce_level(level),
+        event,
+        extra=redact_sensitive(fields),
+        stacklevel=_stacklevel,
+        exc_info=exc_info,
+    )
+
+
+def log_debug(event: str, *, exc_info: bool = False, **fields: Any) -> None:
+    """``log(event, logging.DEBUG, **fields)``."""
+    log(event, logging.DEBUG, _stacklevel=3, exc_info=exc_info, **fields)
+
+
+def log_info(event: str, *, exc_info: bool = False, **fields: Any) -> None:
+    """``log(event, logging.INFO, **fields)``."""
+    log(event, logging.INFO, _stacklevel=3, exc_info=exc_info, **fields)
+
+
+def log_warning(event: str, *, exc_info: bool = False, **fields: Any) -> None:
+    """``log(event, logging.WARNING, **fields)``."""
+    log(event, logging.WARNING, _stacklevel=3, exc_info=exc_info, **fields)
+
+
+def log_error(event: str, *, exc_info: bool = False, **fields: Any) -> None:
+    """``log(event, logging.ERROR, **fields)``."""
+    log(event, logging.ERROR, _stacklevel=3, exc_info=exc_info, **fields)
+
+
+def log_critical(event: str, *, exc_info: bool = False, **fields: Any) -> None:
+    """``log(event, logging.CRITICAL, **fields)``."""
+    log(event, logging.CRITICAL, _stacklevel=3, exc_info=exc_info, **fields)
 
 
 def emit_metric(
@@ -252,10 +394,12 @@ def emit_metric(
     """
     _metrics_logger.info(
         metric_name,
-        extra={
-            "metric_name": metric_name,
-            "metric_value": value,
-            "metric_unit": unit,
-            **dimensions,
-        },
+        extra=redact_sensitive(
+            {
+                "metric_name": metric_name,
+                "metric_value": value,
+                "metric_unit": unit,
+                **dimensions,
+            }
+        ),
     )

@@ -1,0 +1,72 @@
+# Keeps a <!-- commits --> section on the PR body in sync with the branch.
+# Fork PRs cannot use pull_request + GITHUB_TOKEN (read-only). This workflow is
+# API-only: do not check out the PR head.
+name: PR commits section
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: pr-commits-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: write
+
+jobs:
+  update-commits-section:
+    if: github.repository == 'F3Nation-Community/slack-syncbot'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pull_number = context.payload.pull_request.number;
+            const START = '<!-- commits -->';
+            const END = '<!-- /commits -->';
+
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner,
+              repo,
+              pull_number,
+              per_page: 100,
+            });
+
+            const inner = commits
+              .map((c) => {
+                const stripped = c.commit.message
+                  .split('\n')
+                  .filter((line) => !/^\s*Co-authored-by:/i.test(line))
+                  .join('\n')
+                  .trimEnd();
+                const nl = stripped.indexOf('\n');
+                const subject = nl === -1 ? stripped : stripped.slice(0, nl);
+                const body = nl === -1 ? '' : stripped.slice(nl + 1).replace(/^\n+/, '').trimEnd();
+                return body ? `* ${subject}\n\n${body}` : `* ${subject}`;
+              })
+              .join('\n\n');
+
+            const block = `${START}\n${inner}\n${END}`;
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+            const body = pr.body || '';
+            let next;
+            if (body.includes(START) && body.includes(END)) {
+              next = body.replace(/<!-- commits -->[\s\S]*?<!-- \/commits -->/, block);
+            } else {
+              const heading =
+                '## Commits\n\nCopy this list into the squash merge body. GitHub will add one Co-authored-by trailer.\n\n';
+              next = `${body.trimEnd()}\n\n${heading}${block}\n`;
+            }
+            if (next === body) {
+              core.info('Commits section already up to date.');
+              return;
+            }
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: pull_number,
+              body: next,
+            });

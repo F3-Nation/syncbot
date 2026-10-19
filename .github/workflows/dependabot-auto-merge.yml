@@ -1,0 +1,70 @@
+# Enable squash auto-merge for Dependabot patch/minor version updates and
+# security updates (including semver-major when an advisory requires it).
+# Version-only majors are closed. F3Nation-Community/slack-syncbot only.
+# Uses f3n-community-automation (GitHub App) so merge retriggers workflows;
+# GITHUB_TOKEN merges do not. See docs/DEVELOPMENT.md.
+name: Dependabot auto-merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  group: dependabot-automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    # PR author, not github.actor: requirements-sync commits as f3n-community-automation[bot].
+    if: github.repository == 'F3Nation-Community/slack-syncbot' && github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+          owner: F3Nation-Community
+          repositories: slack-syncbot
+
+      - uses: dependabot/fetch-metadata@v2
+        id: meta
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip when hold label is present
+        if: contains(github.event.pull_request.labels.*.name, 'hold')
+        run: echo "hold label set; leaving auto-merge disabled."
+
+      - name: Close version-only major updates
+        if: >-
+          !contains(github.event.pull_request.labels.*.name, 'hold') &&
+          steps.meta.outputs.update-type == 'version-update:semver-major' &&
+          steps.meta.outputs.alert-state == ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr close "$PR_URL" --comment "$(cat <<'EOF'
+          Closing this version-only **major** update. Dependabot is configured to ignore majors unless a **security** advisory requires the bump (see `.github/dependabot.yml`).
+
+          Open a human PR when a runtime or Actions major is intentional (for example Python 3.14).
+          EOF
+          )"
+
+      - name: Enable squash auto-merge
+        if: >-
+          !contains(github.event.pull_request.labels.*.name, 'hold') &&
+          (
+            steps.meta.outputs.update-type != 'version-update:semver-major' ||
+            steps.meta.outputs.alert-state != ''
+          )
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "$PR_URL"
