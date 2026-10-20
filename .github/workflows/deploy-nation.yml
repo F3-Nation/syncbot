@@ -68,4 +68,5 @@ jobs:
           gcloud run services update "syncbot-${{ steps.stage.outputs.stage }}" \
             --project "${{ vars.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
-            --image "$IMAGE"
+            --image "$IMAGE" \
+            --update-secrets "DATA_ENCRYPTION_KEY=syncbot-${{ steps.stage.outputs.stage }}-syncbot-token-encryption-key:latest"

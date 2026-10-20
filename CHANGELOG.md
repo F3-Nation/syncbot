@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- version list -->
 
+## [Unreleased]
+
+### Fixed
+
+- Nation Cloud Run deploys use the existing data encryption key
+
 
 ## [1.7.1] - 2026-09-23
 

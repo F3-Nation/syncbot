@@ -75,6 +75,19 @@ def test_wif_trusts_repository_claim_not_subject_claim() -> None:
     assert "google.subject/repo:" not in main_tf
 
 
+def test_nation_data_encryption_key_alias_uses_existing_stage_secret() -> None:
+    root = INFRA_GCP.parents[1]
+    main_tf = (root / "infra" / "gcp-nation" / "main.tf").read_text(encoding="utf-8")
+    workflow = (root / ".github" / "workflows" / "deploy-nation.yml").read_text(encoding="utf-8")
+
+    assert '"TOKEN_ENCRYPTION_KEY" = var.secret_token_encryption_key' in main_tf
+    assert '"DATA_ENCRYPTION_KEY"  = var.secret_token_encryption_key' in main_tf
+    assert "--update-secrets" in workflow
+    assert (
+        "DATA_ENCRYPTION_KEY=syncbot-${{ steps.stage.outputs.stage }}-syncbot-token-encryption-key:latest" in workflow
+    )
+
+
 def test_dockerfile_pins_litestream_sha256() -> None:
     dockerfile = (INFRA_GCP / "Dockerfile").read_text(encoding="utf-8")
     assert "LITESTREAM_VERSION=v0.3.13" in dockerfile

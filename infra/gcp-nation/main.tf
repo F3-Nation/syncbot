@@ -36,6 +36,7 @@ locals {
     "SLACK_CLIENT_SECRET"  = var.secret_slack_client_secret
     "SLACK_BOT_SCOPES"     = var.secret_slack_bot_scopes
     "TOKEN_ENCRYPTION_KEY" = var.secret_token_encryption_key
+    "DATA_ENCRYPTION_KEY"  = var.secret_token_encryption_key
   }
   syncbot_public_url_effective = trimspace(var.syncbot_public_url_override) != "" ? trimspace(var.syncbot_public_url_override) : ""
   runtime_plain_env = merge(
