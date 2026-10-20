@@ -25,7 +25,7 @@ permissions:
   contents: read
 
 env:
-  DOCKER_CONTEXT: .
+  BUILD_CONTEXT: .
   DOCKERFILE: infra/gcp-nation/Dockerfile
 
 jobs:
@@ -59,7 +59,7 @@ jobs:
       - name: Build and push container image
         run: |
           IMAGE="${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/syncbot-${{ steps.stage.outputs.stage }}-images/syncbot:${{ github.sha }}"
-          docker build -f "$DOCKERFILE" -t "$IMAGE" "$DOCKER_CONTEXT"
+          docker build -f "$DOCKERFILE" -t "$IMAGE" "$BUILD_CONTEXT"
           docker push "$IMAGE"
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
